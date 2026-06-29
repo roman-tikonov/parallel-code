@@ -154,7 +154,7 @@ function resolveWorktreeGitDirMount(startPath: string): string[] {
         if (!match) return [];
         // Walk up from the gitdir pointer until we find the dir containing objects/
         // (the main .git dir). Avoids hard-coding a fixed number of levels.
-        let candidate = path.resolve(match[1].trim());
+        let candidate = path.resolve(dir, match[1].trim());
         while (true) {
           if (fs.existsSync(path.join(candidate, 'objects'))) {
             return ['-v', `${candidate}:${candidate}`];
@@ -324,8 +324,9 @@ export function spawnAgent(
       // Also mount the main .git directory so git commands work inside the
       // container (worktree .git files point to the main git dir by path).
       ...(args.dockerMountWorktreeParent
-        ? ['-v', `${path.dirname(cwd)}:${path.dirname(cwd)}`, ...resolveWorktreeGitDirMount(cwd)]
+        ? ['-v', `${path.dirname(cwd)}:${path.dirname(cwd)}`]
         : []),
+      ...resolveWorktreeGitDirMount(cwd),
       '-v',
       `${cwd}:${cwd}`,
       '-w',

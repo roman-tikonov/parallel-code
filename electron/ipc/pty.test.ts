@@ -239,6 +239,29 @@ describe('spawnAgent docker mode', () => {
     expect(volumeFlags).toContain(`${cwd}:${cwd}`);
   });
 
+  it('volume-mounts the common git dir for a linked worktree in regular docker mode', () => {
+    const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'pty-linked-worktree-repo-'));
+    tempPaths.push(repo);
+
+    const mainGitDir = path.join(repo, '.git');
+    const worktree = path.join(repo, '.worktrees', 'task', 'run-tests-5ea37d');
+    const worktreeGitDir = path.join(mainGitDir, 'worktrees', 'run-tests-5ea37d');
+    fs.mkdirSync(path.join(mainGitDir, 'objects'), { recursive: true });
+    fs.mkdirSync(worktree, { recursive: true });
+    fs.mkdirSync(worktreeGitDir, { recursive: true });
+    fs.writeFileSync(path.join(worktree, '.git'), `gitdir: ${worktreeGitDir}\n`);
+
+    spawnAgent(
+      createMockWindow(),
+      buildSpawnArgs({ cwd: worktree, dockerMountWorktreeParent: false }),
+    );
+
+    const volumeFlags = getFlagValues(getLastSpawnCall().args, '-v');
+    expect(volumeFlags).toContain(`${mainGitDir}:${mainGitDir}`);
+    expect(volumeFlags).toContain(`${worktree}:${worktree}`);
+    expect(volumeFlags).not.toContain(`${path.dirname(worktree)}:${path.dirname(worktree)}`);
+  });
+
   it('injects a per-agent HOME under /tmp into docker run args', () => {
     vi.stubEnv('HOME', '/Users/tester');
 
