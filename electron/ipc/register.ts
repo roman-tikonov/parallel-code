@@ -4,6 +4,7 @@ import fs from 'fs';
 import os from 'os';
 import { fileURLToPath } from 'url';
 import { IPC } from './channels.js';
+import { appendGitInfoExcludeBlock } from './git-exclude.js';
 import {
   spawnAgent,
   writeToAgent,
@@ -36,7 +37,7 @@ import {
   isPrUrl,
 } from './pr-checks.js';
 import { readCoverageSummary } from './coverage.js';
-import { startRemoteServer, getMCPLogs } from '../remote/server.js';
+import { startRemoteServer, getMCPLogs, type RemoteProject } from '../remote/server.js';
 import { atomicWriteFileSync } from '../mcp/atomic.js';
 import { buildMcpLaunchArgs } from '../mcp/agent-args.js';
 import {
@@ -248,6 +249,37 @@ export async function openExternalHttpUrl(
 
 const validateBranchName = sharedValidateBranchName;
 
+type IpcArgs = Record<string, unknown>;
+
+function absolutePathArg(args: IpcArgs, key: string): string {
+  const value = args[key];
+  validatePath(value, key);
+  return value as string;
+}
+
+export function projectRootArg(args: IpcArgs): string {
+  return absolutePathArg(args, 'projectRoot');
+}
+
+export function worktreePathArg(args: IpcArgs): string {
+  return absolutePathArg(args, 'worktreePath');
+}
+
+export function branchNameArg(args: IpcArgs): string {
+  return validateBranchName(args.branchName, 'branchName');
+}
+
+export function optionalBaseBranch(args: IpcArgs): string | undefined {
+  const baseBranch = args.baseBranch || undefined;
+  return baseBranch ? validateBranchName(baseBranch, 'baseBranch') : undefined;
+}
+
+function optionalWorktreePath(args: IpcArgs): string | undefined {
+  const worktreePath = args.worktreePath || undefined;
+  if (worktreePath) validatePath(worktreePath, 'worktreePath');
+  return worktreePath as string | undefined;
+}
+
 /** Reject commit hashes that are not valid hex strings. */
 function validateCommitHash(hash: unknown, label: string): void {
   if (typeof hash !== 'string') throw new Error(`${label} must be a string`);
@@ -368,33 +400,6 @@ function createThrottledForwarder(
  * creates `info/` if missing. Best-effort: never throws, since failing to
  * git-exclude a generated file must not block coordinator startup.
  */
-function appendGitExclude(worktreeRoot: string, marker: string, block: string): void {
-  try {
-    const gitPath = path.join(worktreeRoot, '.git');
-    let infoDir: string;
-    if (fs.statSync(gitPath).isFile()) {
-      const realGitDir = fs
-        .readFileSync(gitPath, 'utf-8')
-        .trim()
-        .replace(/^gitdir:\s*/, '');
-      infoDir = path.join(
-        path.isAbsolute(realGitDir) ? realGitDir : path.resolve(worktreeRoot, realGitDir),
-        'info',
-      );
-    } else {
-      infoDir = path.join(gitPath, 'info');
-    }
-    fs.mkdirSync(infoDir, { recursive: true });
-    const excludePath = path.join(infoDir, 'exclude');
-    const existing = fs.existsSync(excludePath) ? fs.readFileSync(excludePath, 'utf-8') : '';
-    if (!existing.includes(marker)) {
-      fs.appendFileSync(excludePath, block);
-    }
-  } catch (err) {
-    console.warn(`[MCP] Could not git-exclude ${marker}:`, err);
-  }
-}
-
 export function registerAllHandlers(win: BrowserWindow): void {
   // --- Remote access state ---
   let remoteServer: Awaited<ReturnType<typeof startRemoteServer>> | null = null;
@@ -555,92 +560,70 @@ export function registerAllHandlers(win: BrowserWindow): void {
 
   // --- Git commands ---
   ipcMain.handle(IPC.GetChangedFiles, (_e, args) => {
-    validatePath(args.worktreePath, 'worktreePath');
-    const baseBranch = args.baseBranch || undefined;
-    if (baseBranch) validateBranchName(baseBranch, 'baseBranch');
-    return getChangedFiles(args.worktreePath, baseBranch);
+    const worktreePath = worktreePathArg(args);
+    return getChangedFiles(worktreePath, optionalBaseBranch(args));
   });
   ipcMain.handle(IPC.GetChangedFilesFromBranch, (_e, args) => {
-    validatePath(args.projectRoot, 'projectRoot');
-    validateBranchName(args.branchName, 'branchName');
-    const baseBranch = args.baseBranch || undefined;
-    if (baseBranch) validateBranchName(baseBranch, 'baseBranch');
-    return getChangedFilesFromBranch(args.projectRoot, args.branchName, baseBranch);
+    const projectRoot = projectRootArg(args);
+    const branchName = branchNameArg(args);
+    return getChangedFilesFromBranch(projectRoot, branchName, optionalBaseBranch(args));
   });
   ipcMain.handle(IPC.GetAllFileDiffs, (_e, args) => {
-    validatePath(args.worktreePath, 'worktreePath');
-    const baseBranch = args.baseBranch || undefined;
-    if (baseBranch) validateBranchName(baseBranch, 'baseBranch');
-    return getAllFileDiffs(args.worktreePath, baseBranch);
+    const worktreePath = worktreePathArg(args);
+    return getAllFileDiffs(worktreePath, optionalBaseBranch(args));
   });
   ipcMain.handle(IPC.GetUncommittedChangedFiles, (_e, args) => {
-    validatePath(args.worktreePath, 'worktreePath');
-    return getUncommittedChangedFiles(args.worktreePath);
+    return getUncommittedChangedFiles(worktreePathArg(args));
   });
   ipcMain.handle(IPC.GetAllFileDiffsFromBranch, (_e, args) => {
-    validatePath(args.projectRoot, 'projectRoot');
-    validateBranchName(args.branchName, 'branchName');
-    const baseBranch = args.baseBranch || undefined;
-    if (baseBranch) validateBranchName(baseBranch, 'baseBranch');
-    return getAllFileDiffsFromBranch(args.projectRoot, args.branchName, baseBranch);
+    const projectRoot = projectRootArg(args);
+    const branchName = branchNameArg(args);
+    return getAllFileDiffsFromBranch(projectRoot, branchName, optionalBaseBranch(args));
   });
   ipcMain.handle(IPC.GetFileDiff, (_e, args) => {
-    validatePath(args.worktreePath, 'worktreePath');
+    const worktreePath = worktreePathArg(args);
     validateRelativePath(args.filePath, 'filePath');
-    const baseBranch = args.baseBranch || undefined;
-    if (baseBranch) validateBranchName(baseBranch, 'baseBranch');
-    return getFileDiff(args.worktreePath, args.filePath, baseBranch);
+    return getFileDiff(worktreePath, args.filePath, optionalBaseBranch(args));
   });
   ipcMain.handle(IPC.GetFileDiffFromBranch, (_e, args) => {
-    validatePath(args.projectRoot, 'projectRoot');
-    validateBranchName(args.branchName, 'branchName');
+    const projectRoot = projectRootArg(args);
+    const branchName = branchNameArg(args);
     validateRelativePath(args.filePath, 'filePath');
-    const baseBranch = args.baseBranch || undefined;
-    if (baseBranch) validateBranchName(baseBranch, 'baseBranch');
-    return getFileDiffFromBranch(args.projectRoot, args.branchName, args.filePath, baseBranch);
+    return getFileDiffFromBranch(projectRoot, branchName, args.filePath, optionalBaseBranch(args));
   });
   ipcMain.handle(IPC.GetGitignoredDirs, (_e, args) => {
-    validatePath(args.projectRoot, 'projectRoot');
-    return getGitIgnoredDirs(args.projectRoot);
+    return getGitIgnoredDirs(projectRootArg(args));
   });
   ipcMain.handle(IPC.ListImportableWorktrees, (_e, args) => {
-    validatePath(args.projectRoot, 'projectRoot');
-    return listImportableWorktrees(args.projectRoot);
+    return listImportableWorktrees(projectRootArg(args));
   });
   ipcMain.handle(IPC.GetWorktreeStatus, (_e, args) => {
-    validatePath(args.worktreePath, 'worktreePath');
-    const baseBranch = args.baseBranch || undefined;
-    if (baseBranch) validateBranchName(baseBranch, 'baseBranch');
-    return getWorktreeStatus(args.worktreePath, baseBranch);
+    const worktreePath = worktreePathArg(args);
+    return getWorktreeStatus(worktreePath, optionalBaseBranch(args));
   });
   ipcMain.handle(IPC.CommitAll, (_e, args) => {
-    validatePath(args.worktreePath, 'worktreePath');
+    const worktreePath = worktreePathArg(args);
     assertString(args.message, 'message');
-    return commitAll(args.worktreePath, args.message);
+    return commitAll(worktreePath, args.message);
   });
   ipcMain.handle(IPC.DiscardUncommitted, (_e, args) => {
-    validatePath(args.worktreePath, 'worktreePath');
-    return discardUncommitted(args.worktreePath);
+    return discardUncommitted(worktreePathArg(args));
   });
   ipcMain.handle(IPC.CheckMergeStatus, (_e, args) => {
-    validatePath(args.worktreePath, 'worktreePath');
-    const baseBranch = args.baseBranch || undefined;
-    if (baseBranch) validateBranchName(baseBranch, 'baseBranch');
-    return checkMergeStatus(args.worktreePath, baseBranch);
+    const worktreePath = worktreePathArg(args);
+    return checkMergeStatus(worktreePath, optionalBaseBranch(args));
   });
   ipcMain.handle(IPC.MergeTask, (_e, args) => {
-    validatePath(args.projectRoot, 'projectRoot');
-    validateBranchName(args.branchName, 'branchName');
+    const projectRoot = projectRootArg(args);
+    const branchName = branchNameArg(args);
     assertBoolean(args.squash, 'squash');
     assertOptionalString(args.message, 'message');
     assertOptionalBoolean(args.cleanup, 'cleanup');
-    const baseBranch = args.baseBranch || undefined;
-    if (baseBranch) validateBranchName(baseBranch, 'baseBranch');
-    const worktreePath = args.worktreePath || undefined;
-    if (worktreePath) validatePath(worktreePath, 'worktreePath');
+    const baseBranch = optionalBaseBranch(args);
+    const worktreePath = optionalWorktreePath(args);
     return mergeTask(
-      args.projectRoot,
-      args.branchName,
+      projectRoot,
+      branchName,
       args.squash,
       args.message ?? null,
       args.cleanup ?? false,
@@ -649,34 +632,29 @@ export function registerAllHandlers(win: BrowserWindow): void {
     );
   });
   ipcMain.handle(IPC.GetBranchLog, (_e, args) => {
-    validatePath(args.worktreePath, 'worktreePath');
-    const baseBranch = args.baseBranch || undefined;
-    if (baseBranch) validateBranchName(baseBranch, 'baseBranch');
-    return getBranchLog(args.worktreePath, baseBranch);
+    const worktreePath = worktreePathArg(args);
+    return getBranchLog(worktreePath, optionalBaseBranch(args));
   });
   ipcMain.handle(IPC.GetBranchCommits, (_e, args) => {
-    validatePath(args.worktreePath, 'worktreePath');
-    const baseBranch = args.baseBranch || undefined;
-    if (baseBranch) validateBranchName(baseBranch, 'baseBranch');
+    const worktreePath = worktreePathArg(args);
     const recentFallback =
       typeof args.recentFallback === 'number' && args.recentFallback > 0
         ? args.recentFallback
         : undefined;
-    return getBranchCommits(args.worktreePath, baseBranch, recentFallback);
+    return getBranchCommits(worktreePath, optionalBaseBranch(args), recentFallback);
   });
   ipcMain.handle(IPC.GetCommitChangedFiles, (_e, args) => {
-    validatePath(args.worktreePath, 'worktreePath');
+    const worktreePath = worktreePathArg(args);
     validateCommitHash(args.commitHash, 'commitHash');
-    return getCommitChangedFiles(args.worktreePath, args.commitHash);
+    return getCommitChangedFiles(worktreePath, args.commitHash);
   });
   ipcMain.handle(IPC.GetCommitDiffs, (_e, args) => {
-    validatePath(args.worktreePath, 'worktreePath');
+    const worktreePath = worktreePathArg(args);
     validateCommitHash(args.commitHash, 'commitHash');
-    return getCommitDiffs(args.worktreePath, args.commitHash);
+    return getCommitDiffs(worktreePath, args.commitHash);
   });
   ipcMain.handle(IPC.GetUncommittedFileDiffs, (_e, args) => {
-    validatePath(args.worktreePath, 'worktreePath');
-    return getUncommittedFileDiffs(args.worktreePath);
+    return getUncommittedFileDiffs(worktreePathArg(args));
   });
   ipcMain.handle(IPC.GetCoverageSummary, (_e, args) => {
     validatePath(args.repoRoot, 'repoRoot');
@@ -686,37 +664,32 @@ export function registerAllHandlers(win: BrowserWindow): void {
     return readCoverageSummary(args.repoRoot, reportPath);
   });
   ipcMain.handle(IPC.PushTask, (_e, args) => {
-    validatePath(args.projectRoot, 'projectRoot');
-    validateBranchName(args.branchName, 'branchName');
+    const projectRoot = projectRootArg(args);
+    const branchName = branchNameArg(args);
     assertString(args.onOutput?.__CHANNEL_ID__, 'channelId');
-    return pushTask(win, args.projectRoot, args.branchName, args.onOutput.__CHANNEL_ID__);
+    return pushTask(win, projectRoot, branchName, args.onOutput.__CHANNEL_ID__);
   });
   ipcMain.handle(IPC.RebaseTask, (_e, args) => {
-    validatePath(args.worktreePath, 'worktreePath');
-    const baseBranch = args.baseBranch || undefined;
-    if (baseBranch) validateBranchName(baseBranch, 'baseBranch');
-    return rebaseTask(args.worktreePath, baseBranch);
+    const worktreePath = worktreePathArg(args);
+    return rebaseTask(worktreePath, optionalBaseBranch(args));
   });
   ipcMain.handle(IPC.GetMainBranch, (_e, args) => {
-    validatePath(args.projectRoot, 'projectRoot');
-    return getMainBranch(args.projectRoot);
+    return getMainBranch(projectRootArg(args));
   });
   ipcMain.handle(IPC.GetCurrentBranch, (_e, args) => {
-    validatePath(args.projectRoot, 'projectRoot');
-    return getCurrentBranch(args.projectRoot);
+    return getCurrentBranch(projectRootArg(args));
   });
   ipcMain.handle(IPC.CheckoutBranch, (_e, args) => {
-    validatePath(args.projectRoot, 'projectRoot');
-    validateBranchName(args.branchName, 'branchName');
-    return checkoutBranch(args.projectRoot, args.branchName);
+    const projectRoot = projectRootArg(args);
+    const branchName = branchNameArg(args);
+    return checkoutBranch(projectRoot, branchName);
   });
   ipcMain.handle(IPC.CheckIsGitRepo, (_e, args) => {
     validatePath(args.path, 'path');
     return isGitRepo(args.path);
   });
   ipcMain.handle(IPC.GetBranches, (_e, args) => {
-    validatePath(args.projectRoot, 'projectRoot');
-    return getBranches(args.projectRoot);
+    return getBranches(projectRootArg(args));
   });
 
   // --- Persistence ---
@@ -1040,6 +1013,17 @@ export function registerAllHandlers(win: BrowserWindow): void {
       notification.on('failed', (_event, error) => {
         release();
         logWarn('notification', 'show failed', { ...warnCtx, err: error });
+        // Surface the failure to the renderer so the UI can inform the user.
+        // NOTE: The `failed` event only fires on macOS starting in Electron 42
+        // (UNNotification migration). On Electron 40 (current), this code path
+        // is macOS-inert — it still fires on Windows. Once the project upgrades
+        // past Electron 42, this will activate for unsigned macOS builds too.
+        if (!win.isDestroyed()) {
+          win.webContents.send(IPC.NotificationFailed, {
+            error: typeof error === 'string' ? error : String(error),
+            platform: process.platform,
+          });
+        }
       });
       notification.on('click', () => {
         release();
@@ -1181,6 +1165,60 @@ export function registerAllHandlers(win: BrowserWindow): void {
     });
   });
 
+  // --- Mobile task-creation bridge (paired phones) ---
+  // The remote HTTP server runs in main, but task orchestration (worktree +
+  // agent spawn + prompt) lives in the renderer. So a paired phone's request
+  // round-trips: main → webContents.send → renderer runs its normal createTask
+  // → renderer replies via Remote_RendererReply. Reusing the renderer path means
+  // mobile-created tasks also appear on the desktop as first-class tasks.
+  const pendingRemoteRequests = new Map<
+    string,
+    { resolve: (v: unknown) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }
+  >();
+
+  function callRenderer<T>(channel: IPC, payload: Record<string, unknown>): Promise<T> {
+    const reqId = crypto.randomUUID();
+    return new Promise<T>((resolve, reject) => {
+      if (win.isDestroyed()) {
+        reject(new Error('Desktop app is not available'));
+        return;
+      }
+      // Generous timeout: creating a task builds a git worktree and symlinks
+      // gitignored dirs (e.g. node_modules), which can take a while on large
+      // repos. Too short a timeout would report failure to the phone after the
+      // task was actually created, inviting a duplicate on retry.
+      const timer = setTimeout(() => {
+        pendingRemoteRequests.delete(reqId);
+        reject(new Error('Desktop app did not respond'));
+      }, 120_000);
+      pendingRemoteRequests.set(reqId, { resolve: resolve as (v: unknown) => void, reject, timer });
+      win.webContents.send(channel, { reqId, ...payload });
+    });
+  }
+
+  ipcMain.handle(
+    IPC.Remote_RendererReply,
+    (_e, args: { reqId: string; ok: boolean; data?: unknown; error?: string }) => {
+      const pending = pendingRemoteRequests.get(args.reqId);
+      if (!pending) return;
+      clearTimeout(pending.timer);
+      pendingRemoteRequests.delete(args.reqId);
+      if (args.ok) pending.resolve(args.data);
+      else pending.reject(new Error(args.error ?? 'Task creation failed'));
+    },
+  );
+
+  const mobileTaskBridge = {
+    getProjects: () => callRenderer<RemoteProject[]>(IPC.Remote_GetProjectsRequest, {}),
+    createTaskFromMobile: (req: { projectId: string; name: string; prompt: string }) =>
+      callRenderer<{ taskId: string }>(IPC.Remote_CreateTaskRequest, req),
+  };
+
+  ipcMain.handle(IPC.GeneratePairingPin, () => {
+    if (!remoteServer) throw new Error('Remote server is not running');
+    return remoteServer.generatePairingPin();
+  });
+
   // --- Remote access ---
   ipcMain.handle(IPC.StartRemoteServer, async (_e, args: { port?: number }) => {
     const thisDir = path.dirname(fileURLToPath(import.meta.url));
@@ -1198,6 +1236,7 @@ export function registerAllHandlers(win: BrowserWindow): void {
         };
       },
       getCoordinator: () => coordinator,
+      ...mobileTaskBridge,
     };
 
     if (remoteServer) {
@@ -1602,6 +1641,7 @@ export function registerAllHandlers(win: BrowserWindow): void {
             };
           },
           getCoordinator: () => coordinator,
+          ...mobileTaskBridge,
         });
         remoteServerStartedForMcp = true;
       }
@@ -1626,25 +1666,14 @@ export function registerAllHandlers(win: BrowserWindow): void {
       // Build mcpConfig and mergedMcpJson (pure computation — no filesystem or state side effects).
       // Doing this before any Docker copy or coordinator mutation ensures that if .mcp.json
       // merge logic ever grows fallible, Docker residue is never left behind.
-      const mcpConfig = {
-        mcpServers: {
-          'parallel-code': {
-            type: 'stdio' as const,
-            command: 'node',
-            args: [
-              mcpServerPath,
-              '--url',
-              serverUrl,
-              '--coordinator-id',
-              args.coordinatorTaskId,
-              ...(args.skipPermissions && args.propagateSkipPermissions
-                ? ['--skip-permissions']
-                : []),
-            ],
-            env: { PARALLEL_CODE_MCP_TOKEN: remoteServer.token },
-          },
-        },
-      };
+      const mcpConfig = buildCoordinatorMCPConfig({
+        mcpServerPath,
+        serverUrl,
+        token: remoteServer.token,
+        coordinatorTaskId: args.coordinatorTaskId,
+        skipPermissions: args.skipPermissions,
+        propagateSkipPermissions: args.propagateSkipPermissions,
+      });
 
       const configJson = JSON.stringify(mcpConfig, null, 2);
 
@@ -1676,10 +1705,11 @@ export function registerAllHandlers(win: BrowserWindow): void {
         // Keep .parallel-code/ out of git status in the sub-task worktree.
         // Use .git/info/exclude (local-only, never committed) to avoid dirtying
         // a tracked .gitignore file on every Docker coordinator startup.
-        appendGitExclude(
+        appendGitInfoExcludeBlock(
           args.worktreePath ?? args.projectRoot,
           '.parallel-code/',
-          '\n# Parallel Code Docker MCP dir\n.parallel-code/\n',
+          '# Parallel Code Docker MCP dir\n.parallel-code/\n',
+          (err) => console.warn('[MCP] Could not git-exclude .parallel-code/:', err),
         );
       } else {
         coordinator.setDockerContainerName(args.coordinatorTaskId, null);
@@ -1725,10 +1755,11 @@ export function registerAllHandlers(win: BrowserWindow): void {
         );
 
         // Append to .git/info/exclude (local-only gitignore, not committed)
-        appendGitExclude(
+        appendGitInfoExcludeBlock(
           mcpJsonDir,
           '.mcp.json',
-          '\n# Parallel Code MCP config (contains ephemeral token)\n.mcp.json\n',
+          '# Parallel Code MCP config (contains ephemeral token)\n.mcp.json\n',
+          (err) => console.warn('[MCP] Could not git-exclude .mcp.json:', err),
         );
 
         console.warn('[MCP] .mcp.json written to:', worktreeMcpPath);

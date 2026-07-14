@@ -5,7 +5,11 @@ import { store, setStore } from './core';
 import type { WorktreeStatus } from '../ipc/types';
 import type { TaskGitStatusSnapshot } from './types';
 import { warn as logWarn, errMessage } from '../lib/log';
-import { chunkContainsAgentPrompt, stripAnsi } from '../../electron/mcp/prompt-detect';
+import {
+  chunkContainsAgentPrompt,
+  PROMPT_PATTERNS,
+  stripAnsi,
+} from '../../electron/mcp/prompt-detect';
 
 // --- Trust-specific patterns (subset of QUESTION_PATTERNS) ---
 // These are auto-accepted when autoTrustFolders is enabled.
@@ -114,24 +118,6 @@ export type TaskAttentionState = 'idle' | 'active' | 'needs_input' | 'error' | '
 // stripAnsi lives in the shared prompt-detect module (single source of truth);
 // re-exported here for the store barrel and existing call sites.
 export { stripAnsi };
-
-/**
- * Patterns that indicate the agent is waiting for user input (i.e. idle).
- * Each regex is tested against the last non-empty line of stripped output.
- *
- * - Claude Code prompt: ends with ❯ (possibly with trailing whitespace)
- * - Common shell prompts: $, %, #, >
- * - Y/n confirmation prompts
- */
-const PROMPT_PATTERNS: RegExp[] = [
-  /❯\s*$/, // Claude Code prompt
-  /›\s*$/, // Codex CLI prompt
-  /(?:^|\s)\$\s*$/, // bash/zsh dollar prompt (preceded by whitespace or BOL)
-  /(?:^|\s)%\s*$/, // zsh percent prompt
-  /(?:^|\s)#\s*$/, // root prompt
-  /\[Y\/n\]\s*$/i, // Y/n confirmation
-  /\[y\/N\]\s*$/i, // y/N confirmation
-];
 
 /** Returns true if `line` looks like a prompt waiting for input. */
 function looksLikePrompt(line: string): boolean {
@@ -369,7 +355,23 @@ export function looksLikeQuestion(tail: string): boolean {
   // pushing the bare ❯/› line several positions up from the end.
   const lastLine = lines[lines.length - 1].trimEnd();
   const recentLines = lines.slice(-8);
+  // Suppress when the agent is sitting at its real main input prompt — any
+  // earlier question/dialog text still lingering in the buffer has already been
+  // answered.  chunkContainsAgentPrompt is the same readiness detector the
+  // coordinator trusts to inject prompts; unlike the bare-❯ checks below it
+  // splits on a lone \r and scans the last ~1000 chars, so it recognises the
+  // bare ❯/›/--INSERT-- line even when a deep status footer or a \r-separated
+  // TUI redraw pushes it out of this function's \r?\n line-split window.  It
+  // returns not-ready for trust/permission/selection dialogs and busy states,
+  // so real questions are preserved.  Normalisation mirrors
+  // coordinator.ts:normalizedTail (control chars → space, preserving \r and \n).
+  const readyProbe = visible
+    // eslint-disable-next-line no-control-regex -- preserve \r and \n as line breaks for anchored prompt detection.
+    .replace(/[\x00-\x09\x0b-\x0c\x0e-\x1f\x7f]/g, ' ')
+    .replace(/[ \t]+/g, ' ')
+    .trim();
   if (
+    chunkContainsAgentPrompt(readyProbe) ||
     recentLines.some(looksLikeBareAgentPrompt) ||
     /[❯›]\s*$/.test(lastLine) ||
     looksLikeBareShellPrompt(lastLine)

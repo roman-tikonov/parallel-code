@@ -19,6 +19,7 @@ import {
   getPanelUserSize,
   setPanelUserSize,
   deletePanelUserSize,
+  scrollTaskElementIntoView,
 } from '../store/store';
 import { closeTask } from '../store/tasks';
 import { TaskPanel } from './TaskPanel';
@@ -52,6 +53,7 @@ export function TilingLayout() {
   // Transient per-drag width overrides. Written on mousemove, committed to
   // store.panelSizes on mouseup. Keeps autosave's snapshot stable mid-drag.
   const [dragPreview, setDragPreview] = createSignal<Record<string, number>>({});
+  let isFirstActiveTaskScroll = true;
 
   function sizeFor(child: TileChild): number {
     const preview = dragPreview()[child.id];
@@ -196,7 +198,11 @@ export function TilingLayout() {
     }
 
     const el = containerRef.querySelector<HTMLElement>(`[data-task-id="${CSS.escape(activeId)}"]`);
-    el?.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'instant' });
+    if (el) {
+      const behavior: ScrollBehavior = isFirstActiveTaskScroll ? 'instant' : 'smooth';
+      isFirstActiveTaskScroll = false;
+      scrollTaskElementIntoView(containerRef, el, behavior);
+    }
     requestAnimationFrame(() => updateViewportState());
   });
 
@@ -392,7 +398,7 @@ export function TilingLayout() {
 
   return (
     <div class="tiling-layout-shell">
-      <div ref={containerRef} class="tiling-layout-strip">
+      <div ref={containerRef} class="tiling-layout-strip" data-tiling-strip>
         <Show
           when={store.taskOrder.length > 0}
           fallback={

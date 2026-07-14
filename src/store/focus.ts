@@ -22,6 +22,7 @@ export {
   getTaskFocusedPanel,
   isAiTerminalPanel,
   registerFocusFn,
+  scrollTaskElementIntoView,
   setTaskFocusedPanel,
   triggerFocus,
   unregisterFocusFn,

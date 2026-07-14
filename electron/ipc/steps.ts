@@ -2,6 +2,14 @@ import fs from 'fs';
 import path from 'path';
 import type { BrowserWindow } from 'electron';
 import { IPC } from './channels.js';
+import { appendGitInfoExcludeBlock } from './git-exclude.js';
+import {
+  debug as logDebug,
+  info as logInfo,
+  warn as logWarn,
+  error as logError,
+  errMessage,
+} from '../log.js';
 
 interface StepsWatcher {
   fsWatcher: fs.FSWatcher | null;
@@ -29,7 +37,7 @@ const processedCount = new Map<string, number>();
 function sendStepsContent(win: BrowserWindow, taskId: string, stepsFile: string): void {
   if (win.isDestroyed()) return;
   const steps = readStepsFile(stepsFile);
-  console.warn('[steps.send]', taskId, 'len=', steps?.length ?? 'null');
+  logInfo('steps', 'send', { taskId, len: steps?.length ?? null });
   if (steps) applyTimestamps(steps, stepsFile, taskId);
   win.webContents.send(IPC.StepsContent, { taskId, steps });
 }
@@ -64,20 +72,52 @@ function applyTimestamps(steps: unknown[], stepsFile: string, taskId: string): v
   try {
     fs.writeFileSync(stepsFile, JSON.stringify(steps, null, 2), 'utf-8');
   } catch (err) {
-    console.warn('[steps] Failed to write back timestamps:', err);
+    logWarn('steps', 'failed to write back timestamps', { err: errMessage(err) });
   }
 }
 
-/** Reads and parses `.claude/steps.json`. Returns the array or null. */
+function isStepObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+/**
+ * Parses the canonical JSON array plus the single-object / JSONL forms that
+ * append-oriented agents commonly produce. The watcher normalizes supported
+ * alternatives back to an array when it adds host timestamps.
+ */
+export function parseStepsContent(raw: string): unknown[] | null {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (Array.isArray(parsed)) return parsed;
+    return isStepObject(parsed) ? [parsed] : null;
+  } catch {
+    const lines = raw
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    if (lines.length === 0) return null;
+
+    try {
+      const entries: unknown[] = lines.map((line) => JSON.parse(line) as unknown);
+      return entries.every(isStepObject) ? entries : null;
+    } catch {
+      return null;
+    }
+  }
+}
+
+/** Reads and parses `.claude/steps.json`. Returns the entries or null. */
 function readStepsFile(stepsFile: string): unknown[] | null {
   try {
     const raw = fs.readFileSync(stepsFile, 'utf-8');
-    const parsed: unknown = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return null;
-    return parsed as unknown[];
+    const steps = parseStepsContent(raw);
+    if (!steps) logWarn('steps', 'invalid steps file format', { stepsFile });
+    return steps;
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code !== 'ENOENT') {
-      console.error('[steps] Failed to read steps file:', e);
+      // Non-ENOENT read failures (corrupt file, permissions, etc.)
+      // capture the full stack via the structured logger.
+      logError('steps', 'failed to read steps file', e);
     }
     return null;
   }
@@ -87,45 +127,10 @@ function readStepsFile(stepsFile: string): unknown[] | null {
  * Resolves the path to the git exclude file for a given worktree.
  * For linked worktrees, .git is a file pointing to the actual git dir.
  */
-function getGitExcludePath(worktreePath: string): string | null {
-  const gitPath = path.join(worktreePath, '.git');
-  try {
-    const stat = fs.statSync(gitPath);
-    if (stat.isDirectory()) {
-      return path.join(gitPath, 'info', 'exclude');
-    }
-    // Linked worktree: .git is a file "gitdir: /path/to/.git/worktrees/<name>"
-    const content = fs.readFileSync(gitPath, 'utf-8').trim();
-    const match = /^gitdir: (.+)$/.exec(content);
-    if (!match) return null;
-    return path.join(match[1], 'info', 'exclude');
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Ensures `.claude/steps.json` is excluded from git via the worktree's
- * `.git/info/exclude` (local, never committed) so the file never shows up
- * in the user's diff.
- */
 function ensureStepsIgnored(worktreePath: string): void {
-  const excludePath = getGitExcludePath(worktreePath);
-  if (!excludePath) return;
-  const entry = '.claude/steps.json';
-  try {
-    let content = '';
-    if (fs.existsSync(excludePath)) {
-      content = fs.readFileSync(excludePath, 'utf-8');
-      if (content.split('\n').some((line) => line.trim() === entry)) return;
-    } else {
-      fs.mkdirSync(path.dirname(excludePath), { recursive: true });
-    }
-    const prefix = content.length > 0 && !content.endsWith('\n') ? '\n' : '';
-    fs.appendFileSync(excludePath, `${prefix}${entry}\n`, 'utf-8');
-  } catch (err) {
-    console.warn('Failed to update git exclude for steps:', err);
-  }
+  appendGitInfoExcludeBlock(worktreePath, '.claude/steps.json', '.claude/steps.json\n', (err) => {
+    logWarn('steps', 'failed to update git exclude', { err: errMessage(err) });
+  });
 }
 
 /**
@@ -157,7 +162,7 @@ export function startStepsWatcher(win: BrowserWindow, taskId: string, worktreePa
 
   // filename may be null on some platforms; if present, filter to steps.json only
   const onChange = (event: string, filename: string | Buffer | null) => {
-    console.warn('[steps.watch]', taskId, event, String(filename));
+    logDebug('steps', 'watch event', { taskId, event, filename: String(filename) });
     if (filename !== null && filename !== 'steps.json') return;
     const current = watchers.get(taskId);
     if (!current) return;
@@ -187,11 +192,11 @@ export function startStepsWatcher(win: BrowserWindow, taskId: string, worktreePa
         }
       });
       parentWatcher.on('error', (err) => {
-        console.warn(`Steps parent watcher error for ${worktreePath}:`, err);
+        logError('steps', 'parent watcher error', err, { worktreePath });
       });
       entry.fsWatcher = parentWatcher;
     } catch (err) {
-      console.warn(`Failed to watch worktree root ${worktreePath}:`, err);
+      logError('steps', 'failed to watch worktree root', err, { worktreePath });
     }
   }
 
@@ -212,12 +217,12 @@ function attachStepsDirWatcher(
   try {
     const watcher = fs.watch(entry.stepsDir, onChange);
     watcher.on('error', (err) => {
-      console.warn(`Steps watcher error for ${entry.stepsDir}:`, err);
+      logError('steps', 'watcher error', err, { stepsDir: entry.stepsDir });
     });
     entry.fsWatcher = watcher;
     watchers.set(taskId, entry);
   } catch (err) {
-    console.warn(`Failed to watch steps directory ${entry.stepsDir}:`, err);
+    logError('steps', 'failed to watch steps dir', err, { stepsDir: entry.stepsDir });
   }
 }
 

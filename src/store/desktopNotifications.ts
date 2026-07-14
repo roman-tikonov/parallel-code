@@ -230,12 +230,34 @@ export function startDesktopNotificationWatcher(windowFocused: Accessor<boolean>
     },
   );
 
+  // Surface notification failures to the UI.
+  // NOTE: The `failed` event only fires on macOS from Electron 42+ (UNNotification
+  // migration). On the current Electron 40, this path is macOS-inert — it fires
+  // on Windows only. After an Electron 42 upgrade, unsigned macOS builds will
+  // trigger this handler, letting the user know notifications need code-signing.
+  const offNotificationFailed = window.electron.ipcRenderer.on(
+    IPC.NotificationFailed,
+    (data: unknown) => {
+      const msg = data as Record<string, unknown>;
+      if (msg?.platform === 'darwin') {
+        // Visible in the renderer console (DevTools). A future follow-up can
+        // add a toast/banner when the design for settings-level alerts lands.
+        console.warn(
+          '[notifications] macOS notification delivery failed. Unsigned dev builds need ' +
+            'ad-hoc code-signing (codesign --force --deep -s - <app>). Error:',
+          msg?.error,
+        );
+      }
+    },
+  );
+
   let cleanedUp = false;
   const cleanup = (): void => {
     if (cleanedUp) return;
     cleanedUp = true;
     if (debounceTimer !== undefined) clearTimeout(debounceTimer);
     offNotificationClicked();
+    offNotificationFailed();
     if (activeDesktopNotificationWatcherCleanup === cleanup) {
       activeDesktopNotificationWatcherCleanup = undefined;
     }

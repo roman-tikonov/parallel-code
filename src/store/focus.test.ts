@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { expectDefined, type MockStoreHarness } from './test-helpers';
 
 type MockStore = {
   activeTaskId: string | null;
@@ -34,36 +35,19 @@ type MockTask = {
 };
 
 let mockStore: MockStore;
-
-function setStorePath(...args: unknown[]): void {
-  const value = args[args.length - 1];
-  let target: Record<string, unknown> = mockStore as unknown as Record<string, unknown>;
-  for (let i = 0; i < args.length - 2; i++) {
-    const key = args[i] as string;
-    const next = target[key] as Record<string, unknown> | undefined;
-    if (!next || typeof next !== 'object') {
-      target[key] = {};
-    }
-    target = target[key] as Record<string, unknown>;
-  }
-  target[args[args.length - 2] as string] = value;
-}
+const core = vi.hoisted(() => ({
+  harness: undefined as MockStoreHarness<MockStore> | undefined,
+}));
 
 vi.mock('solid-js', () => ({
   batch: (fn: () => void) => fn(),
 }));
 
-vi.mock('./core', () => ({
-  store: new Proxy(
-    {},
-    {
-      get(_target, prop) {
-        return mockStore[prop as keyof MockStore];
-      },
-    },
-  ),
-  setStore: vi.fn((...args: unknown[]) => setStorePath(...args)),
-}));
+vi.mock('./core', async () => {
+  const { createMockStoreHarness } = await import('./test-helpers');
+  core.harness = createMockStoreHarness<MockStore>({} as MockStore);
+  return core.harness.moduleMock();
+});
 
 vi.mock('./navigation', () => ({
   setActiveTask: vi.fn((id: string) => {
@@ -82,7 +66,12 @@ vi.mock('./tasks', () => ({
   }),
 }));
 
-import { navigateColumn, navigateRow } from './focus';
+import {
+  navigateColumn,
+  navigateRow,
+  scrollTaskElementIntoView,
+  setTaskFocusedPanel,
+} from './focus';
 
 function setTask(id: string, overrides: Record<string, unknown> = {}): void {
   mockStore.tasks[id] = {
@@ -98,7 +87,8 @@ function setTask(id: string, overrides: Record<string, unknown> = {}): void {
 }
 
 beforeEach(() => {
-  mockStore = {
+  const harness = expectDefined(core.harness, 'mock store harness');
+  mockStore = harness.reset({
     activeTaskId: 'task-1',
     activeAgentId: 'agent-1',
     tasks: {},
@@ -117,7 +107,7 @@ beforeEach(() => {
     showPromptInput: true,
     sidebarVisible: true,
     taskSplitMode: {},
-  };
+  });
 
   vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
     cb(0);
@@ -221,5 +211,141 @@ describe('focus navigation neighbor map', () => {
     navigateRow('down');
 
     expect(mockStore.focusedPanel['task-1']).toBe('shell:0');
+  });
+});
+
+describe('scrollTaskElementIntoView', () => {
+  function createScroller(
+    overrides: Partial<HTMLElement> & { taskEls?: HTMLElement[] } = {},
+  ): HTMLElement {
+    const { taskEls = [], ...rest } = overrides;
+    return {
+      scrollLeft: 200,
+      clientWidth: 300,
+      scrollWidth: 1_000,
+      getBoundingClientRect: vi.fn(function (this: HTMLElement) {
+        return { left: 0, right: this.clientWidth };
+      }),
+      scrollTo: vi.fn(),
+      querySelectorAll: vi.fn(() => taskEls),
+      ...rest,
+    } as unknown as HTMLElement;
+  }
+
+  function createItem(overrides: Partial<HTMLElement> & { left?: number } = {}): HTMLElement {
+    const { left = 0, ...rest } = overrides;
+    return {
+      offsetWidth: 100,
+      getBoundingClientRect: vi.fn(function (this: HTMLElement) {
+        return { left, right: left + this.offsetWidth };
+      }),
+      scrollIntoView: vi.fn(),
+      ...rest,
+    } as unknown as HTMLElement;
+  }
+
+  it('delegates normal tasks to native scrollIntoView, scrolling only the strip', () => {
+    const scroller = createScroller();
+    const el = createItem();
+
+    scrollTaskElementIntoView(scroller, el);
+
+    expect(el.scrollIntoView).toHaveBeenCalledWith({
+      block: 'nearest',
+      inline: 'nearest',
+      behavior: 'instant',
+    });
+    expect(scroller.scrollTo).not.toHaveBeenCalled();
+  });
+
+  it('passes the requested behavior through to scrollIntoView', () => {
+    const scroller = createScroller();
+    const el = createItem();
+
+    scrollTaskElementIntoView(scroller, el, 'smooth');
+
+    expect(el.scrollIntoView).toHaveBeenCalledWith({
+      block: 'nearest',
+      inline: 'nearest',
+      behavior: 'smooth',
+    });
+  });
+
+  it('falls back to native scrollIntoView when there is no strip scroller', () => {
+    const el = createItem();
+
+    scrollTaskElementIntoView(null, el, 'smooth');
+
+    expect(el.scrollIntoView).toHaveBeenCalledWith({
+      block: 'nearest',
+      inline: 'nearest',
+      behavior: 'smooth',
+    });
+  });
+
+  it('pins a very wide task to the left preview boundary instead of native nearest', () => {
+    const scroller = createScroller();
+    // clientWidth 300 - 2*64 = 172 available; a 400px-wide task overflows it.
+    const el = createItem({ offsetWidth: 400, left: 250 });
+
+    scrollTaskElementIntoView(scroller, el);
+
+    // scrollLeft 200 + (itemLeft 250 - scrollerLeft 0) - 64 preview = 386.
+    expect(scroller.scrollTo).toHaveBeenCalledWith({ left: 386, behavior: 'instant' });
+    expect(el.scrollIntoView).not.toHaveBeenCalled();
+  });
+
+  it('clamps the very-wide-task target to the available scroll range', () => {
+    const scroller = createScroller();
+    const el = createItem({ offsetWidth: 400, left: 900 });
+
+    scrollTaskElementIntoView(scroller, el);
+
+    // 200 + 900 - 64 = 1036, clamped to scrollWidth - clientWidth = 700.
+    expect(scroller.scrollTo).toHaveBeenCalledWith({ left: 700, behavior: 'instant' });
+  });
+
+  it('snaps the last task flush to the right edge of the strip', () => {
+    const el = createItem();
+    const scroller = createScroller({ taskEls: [el] });
+
+    scrollTaskElementIntoView(scroller, el);
+
+    expect(scroller.scrollTo).toHaveBeenCalledWith({
+      left: scroller.scrollWidth - scroller.clientWidth,
+      behavior: 'instant',
+    });
+    expect(el.scrollIntoView).not.toHaveBeenCalled();
+  });
+
+  it('passes the requested behavior through when snapping the last task', () => {
+    const el = createItem();
+    const scroller = createScroller({ taskEls: [el] });
+
+    scrollTaskElementIntoView(scroller, el, 'smooth');
+
+    expect(scroller.scrollTo).toHaveBeenCalledWith({
+      left: scroller.scrollWidth - scroller.clientWidth,
+      behavior: 'smooth',
+    });
+  });
+
+  it('smooth-scrolls via native scrollIntoView when focusing a panel in a task', () => {
+    setTask('task-1');
+    setTask('task-2');
+    mockStore.taskOrder = ['task-1', 'task-2'];
+    const scroller = createScroller();
+    const el = createItem({ closest: vi.fn(() => scroller) } as Partial<HTMLElement>);
+    vi.stubGlobal('document', {
+      querySelector: vi.fn(() => el),
+    });
+
+    setTaskFocusedPanel('task-2', 'ai-terminal');
+
+    expect(el.scrollIntoView).toHaveBeenCalledWith({
+      block: 'nearest',
+      inline: 'nearest',
+      behavior: 'smooth',
+    });
   });
 });

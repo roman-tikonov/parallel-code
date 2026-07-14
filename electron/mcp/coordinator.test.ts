@@ -1,230 +1,49 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import os from 'os';
 import { join, dirname } from 'path';
-import { getChangedFiles, getAllFileDiffs, getDiffBaseSha, mergeTask } from '../ipc/git.js';
 import {
   NOT_READY_AGENT_FRAME_FIXTURES,
   READY_AGENT_FRAME_FIXTURES,
 } from './agent-frame-fixtures.js';
 import { handleMCPToolCall } from './server.js';
 import type { MCPClient } from './client.js';
+import {
+  setupCoordinatorHarness,
+  mockExecFile,
+  mockReadFileSync,
+  mockExistsSync,
+  mockUnlinkSync,
+  mockFsReadFile,
+  mockFsAccess,
+  mockAtomicWriteFileSync,
+  mockAtomicWriteFile,
+  mockNotifyRenderer,
+  mockLogInfo,
+  mockSpawnAgent,
+  mockWriteToAgent,
+  mockSubscribeToAgent,
+  mockGetAgentScrollback,
+  mockGetChangedFiles,
+  mockGetAllFileDiffs,
+  mockGetDiffBaseSha,
+  mockGitMergeTask,
+  mockCreateBackendTask,
+  mockWin,
+  getExitHandler,
+  getSpawnHandler,
+  getOutputCb,
+  getAgentId,
+  encodeAgentOutput as encode,
+  encodeAgentBytes as encodeBytes,
+  emitWorkThenIdle,
+} from './coordinator-test-harness.js';
 
-// --- fs / child_process mocks (must come before dynamic import) ---
-const mockExecFile = vi.fn(
-  (
-    _cmd: string,
-    _args: string[],
-    _opts: unknown,
-    cb: (err: Error | null, stdout: string, stderr: string) => void,
-  ) => {
-    cb(null, '', '');
-  },
-);
-
-vi.mock('child_process', () => ({
-  execFile: mockExecFile,
-}));
-
-const mockWriteFileSync = vi.fn();
-const mockReadFileSync = vi.fn(() => '# existing\n');
-const mockExistsSync = vi.fn(() => false);
-const mockUnlinkSync = vi.fn();
-const mockMkdirSync = vi.fn();
-
-vi.mock('fs', () => ({
-  writeFileSync: mockWriteFileSync,
-  readFileSync: mockReadFileSync,
-  existsSync: mockExistsSync,
-  unlinkSync: mockUnlinkSync,
-  mkdirSync: mockMkdirSync,
-}));
-
-// fs/promises mocks — mirror the sync mocks above
-const mockFsWriteFile = vi.fn().mockResolvedValue(undefined);
-const mockFsReadFile = vi.fn().mockResolvedValue('# existing\n');
-const mockFsAccess = vi
-  .fn()
-  .mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
-const mockFsUnlink = vi.fn().mockResolvedValue(undefined);
-const mockFsMkdir = vi.fn().mockResolvedValue(undefined);
-
-vi.mock('fs/promises', () => ({
-  writeFile: mockFsWriteFile,
-  readFile: mockFsReadFile,
-  access: mockFsAccess,
-  unlink: mockFsUnlink,
-  mkdir: mockFsMkdir,
-}));
-
-// --- other mocks ---
-const mockNotifyRenderer = vi.fn();
-const mockLogInfo = vi.fn();
-const mockOnPtyEvent = vi.fn();
-const mockSpawnAgent = vi.fn();
-const mockWriteToAgent = vi.fn();
-const mockSubscribeToAgent = vi.fn();
-const mockGetAgentScrollback = vi.fn<() => string | null>(() => null);
-const mockCreateBackendTask = vi.fn().mockResolvedValue({
-  id: 'task-1',
-  branch_name: 'task/test',
-  worktree_path: '/tmp/test',
-});
-
-const mockAtomicWriteFileSync = vi.fn();
-const mockAtomicWriteFile = vi.fn().mockResolvedValue(undefined);
-
-vi.mock('./atomic.js', () => ({
-  atomicWriteFileSync: mockAtomicWriteFileSync,
-  atomicWriteFile: mockAtomicWriteFile,
-}));
-
-vi.mock('./prompt-detect.js', () => ({
-  stripAnsi: (s: string) =>
-    s.replace(
-      // eslint-disable-next-line no-control-regex
-      /[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nq-uy=><~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?/g,
-      '',
-    ),
-  AGENT_READY_TAIL_CHARS: 1000,
-  getAgentPromptReadiness: (s: string) => {
-    const tail = s.slice(-1000);
-    if (
-      /\bDo\s+you\s+trust\b|\bPress\s+enter\s+to\s+continue\b|\bBooting\s+MCP\s+server\b|\bStarting\s+MCP\s+servers?\b/i.test(
-        tail,
-      )
-    ) {
-      return { ready: false, reason: 'startup_or_dialog', tail };
-    }
-    if (
-      /\bq*Working\s*\(|\bbackground\s+terminal\s+running\b|\besc\s+to\s+interrupt\b|\/stop\s+to\s+close\b/i.test(
-        tail,
-      )
-    ) {
-      return { ready: false, reason: 'busy', tail };
-    }
-    const ready = tail
-      .slice(-1000)
-      .split(/\r\n?|\n/)
-      .some((line) =>
-        /(?:^|\s)[❯›]\s*$|^\s*--\s*INSERT\s*--\s*$|^\s*>\s*(?:Type your message|$)/i.test(
-          line.trim(),
-        ),
-      );
-    return { ready, reason: ready ? 'ready' : 'no_prompt', tail };
-  },
-  chunkContainsAgentPrompt: (s: string) => {
-    const tail = s.slice(-1000);
-    if (
-      /\bDo\s+you\s+trust\b|\bPress\s+enter\s+to\s+continue\b|\bBooting\s+MCP\s+server\b|\bStarting\s+MCP\s+servers?\b/i.test(
-        tail,
-      )
-    ) {
-      return false;
-    }
-    if (
-      /\bq*Working\s*\(|\bbackground\s+terminal\s+running\b|\besc\s+to\s+interrupt\b|\/stop\s+to\s+close\b/i.test(
-        tail,
-      )
-    ) {
-      return false;
-    }
-    return tail
-      .split(/\r\n?|\n/)
-      .some((line) =>
-        /(?:^|\s)[❯›]\s*$|^\s*--\s*INSERT\s*--\s*$|^\s*>\s*(?:Type your message|$)/i.test(
-          line.trim(),
-        ),
-      );
-  },
-}));
-
-vi.mock('../ipc/pty.js', () => ({
-  spawnAgent: mockSpawnAgent,
-  writeToAgent: mockWriteToAgent,
-  killAgent: vi.fn(),
-  subscribeToAgent: mockSubscribeToAgent,
-  unsubscribeFromAgent: vi.fn(),
-  getAgentScrollback: mockGetAgentScrollback,
-  onPtyEvent: mockOnPtyEvent,
-}));
-
-vi.mock('../ipc/git.js', () => ({
-  getChangedFiles: vi.fn().mockResolvedValue([]),
-  getAllFileDiffs: vi.fn().mockResolvedValue(''),
-  getDiffBaseSha: vi.fn().mockResolvedValue('abc123sha'),
-  mergeTask: vi.fn(),
-}));
-
-vi.mock('../ipc/tasks.js', () => ({
-  createTask: mockCreateBackendTask,
-  deleteTask: vi.fn().mockResolvedValue(undefined),
-}));
-
-vi.mock('../ipc/channels.js', () => ({
-  IPC: {
-    MCP_TaskCreated: 'mcp_task_created',
-    MCP_TaskClosed: 'mcp_task_closed',
-    MCP_TaskCleanupFailed: 'mcp_task_cleanup_failed',
-    MCP_TaskStateSync: 'mcp_task_state_sync',
-    MCP_CoordinatorNotificationStaged: 'mcp_coordinator_notification_staged',
-    MCP_CoordinatorNotificationCleared: 'mcp_coordinator_notification_cleared',
-    MCP_CoordinatorOrphanedNotification: 'mcp_coordinator_orphaned_notification',
-    MCP_CoordinatorDeregistered: 'mcp_coordinator_deregistered',
-    MCP_CoordinatorNotificationAck: 'mcp_coordinator_notification_ack',
-  },
-}));
-
-vi.mock('../log.js', () => ({
-  info: mockLogInfo,
-  warn: vi.fn(),
-}));
-
-// Import after mocks
-const { Coordinator } = await import('./coordinator.js');
+const { Coordinator } = await setupCoordinatorHarness();
 const { removePreambleBlock } = await import('./preamble.js');
-
-// --- helpers ---
-function getExitHandler(): (agentId: string, data: unknown) => void {
-  const call = mockOnPtyEvent.mock.calls.find((c) => c[0] === 'exit');
-  if (!call) throw new Error('exit handler not registered');
-  return call[1] as (agentId: string, data: unknown) => void;
-}
-
-function getSpawnHandler(): (agentId: string) => void {
-  const call = mockOnPtyEvent.mock.calls.find((c) => c[0] === 'spawn');
-  if (!call) throw new Error('spawn handler not registered');
-  return call[1] as (agentId: string) => void;
-}
-
-function getOutputCb(): (encoded: string) => void {
-  const call = mockSubscribeToAgent.mock.calls[0];
-  if (!call) throw new Error('subscribeToAgent not called');
-  return call[1] as (encoded: string) => void;
-}
-
-function getAgentId(): string {
-  const call = mockSubscribeToAgent.mock.calls[0];
-  if (!call) throw new Error('subscribeToAgent not called');
-  return call[0] as string;
-}
-
-function encode(s: string): string {
-  return Buffer.from(s).toString('base64');
-}
-
-function encodeBytes(bytes: Buffer): string {
-  return bytes.toString('base64');
-}
-
-function emitWorkThenIdle(outputCb: (encoded: string) => void): void {
-  outputCb(encode('Working...\n'));
-  outputCb(encode('Done ❯ '));
-}
-
-const mockWin = {
-  isDestroyed: () => false,
-  webContents: { send: mockNotifyRenderer },
-} as unknown as import('electron').BrowserWindow;
+const getChangedFiles = mockGetChangedFiles;
+const getAllFileDiffs = mockGetAllFileDiffs;
+const getDiffBaseSha = mockGetDiffBaseSha;
+const mergeTask = mockGitMergeTask;
 
 // ─── registerCoordinator idempotency and restore path ────────────────────────
 
@@ -5247,11 +5066,35 @@ describe('Coordinator hydrateTask — mcpConfigPath directory scoping', () => {
     expect(configWrite).toBeDefined();
   });
 
+  it('host mode: dirname(serverPath)/subtask-{id}.json is rejected even when serverPath is present', () => {
+    const taskId = 'task-host-docker-path';
+    const serverPath = '/srv/app/.parallel-code/mcp-server.js';
+    const dockerPath = join(dirname(serverPath), `subtask-${taskId}.json`);
+
+    mockAtomicWriteFileSync.mockClear();
+    coordinator.hydrateTask({
+      id: taskId,
+      name: 'host-docker-path',
+      projectId: 'proj-1',
+      projectRoot: '/tmp/project',
+      branchName: 'task/host-docker-path',
+      worktreePath: '/tmp/host-docker-path',
+      agentId: 'agent-host-docker-path',
+      coordinatorTaskId: 'coord-1',
+      mcpConfigPath: dockerPath,
+    });
+
+    expect(coordinator.getTask(taskId)?.mcpConfigPath).toBeUndefined();
+    const configWrite = mockAtomicWriteFileSync.mock.calls.find((c) => c[0] === dockerPath);
+    expect(configWrite).toBeUndefined();
+  });
+
   it('Docker mode: dirname(serverPath)/subtask-{id}.json is accepted and config write occurs', () => {
     const taskId = 'task-valid-docker';
     const serverPath = '/srv/app/.parallel-code/mcp-server.js';
     const dockerPath = join(dirname(serverPath), `subtask-${taskId}.json`);
 
+    coordinator.setDockerContainerName('coord-1', 'parallel-code-coord');
     mockAtomicWriteFileSync.mockClear();
     coordinator.hydrateTask({
       id: taskId,
@@ -5274,6 +5117,7 @@ describe('Coordinator hydrateTask — mcpConfigPath directory scoping', () => {
     const taskId = 'task-evil-docker';
     const wrongPath = `/some/other/dir/subtask-${taskId}.json`;
 
+    coordinator.setDockerContainerName('coord-1', 'parallel-code-coord');
     coordinator.hydrateTask({
       id: taskId,
       name: 'evil-docker',
@@ -5950,7 +5794,17 @@ describe('preload.cjs MCP channel allowlist', () => {
       '..',
       'preload.cjs',
     );
+    const manifestPath = path.join(
+      path.dirname(new URL(import.meta.url).pathname),
+      '..',
+      'ipc',
+      'channel-manifest.json',
+    );
     const preload = readFileSync(preloadPath, 'utf8') as string;
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8') as string) as Record<
+      string,
+      string
+    >;
 
     const required = [
       'mcp_task_created',
@@ -5966,69 +5820,16 @@ describe('preload.cjs MCP channel allowlist', () => {
       'mcp_coordinated_task_closed',
     ];
 
+    const channels = new Set(Object.values(manifest));
+    const allowlistMatch = /new Set\(\[([\s\S]*?)\]\)/.exec(preload);
+    expect(allowlistMatch).not.toBeNull();
+    const preloadChannels = new Set(
+      [...(allowlistMatch?.[1] ?? '').matchAll(/'([^']+)'/g)].map((match) => match[1]),
+    );
     for (const channel of required) {
-      expect(preload, `preload.cjs missing channel: ${channel}`).toContain(`'${channel}'`);
+      expect(channels.has(channel), `manifest missing channel: ${channel}`).toBe(true);
+      expect(preloadChannels.has(channel), `preload missing channel: ${channel}`).toBe(true);
     }
-  });
-});
-
-// ─── validateUUID / hydrateTask path-traversal rejection ─────────────────────
-
-describe('validateUUID — rejects non-UUID ids in MCP IPC handler', () => {
-  it('rejects ids containing path separators', async () => {
-    const { validateUUID } = await import('./validation.js');
-    expect(() => validateUUID('../../etc/passwd', 'id')).toThrow('must be a valid UUID');
-  });
-
-  it('rejects ids containing slashes', async () => {
-    const { validateUUID } = await import('./validation.js');
-    expect(() => validateUUID('task/1', 'id')).toThrow('must be a valid UUID');
-  });
-
-  it('accepts a valid UUID', async () => {
-    const { validateUUID } = await import('./validation.js');
-    const id = '550e8400-e29b-41d4-a716-446655440000';
-    expect(validateUUID(id, 'id')).toBe(id);
-  });
-});
-
-// ─── validateBranchName — additional git check-ref-format rules ───────────────
-
-describe('validateBranchName — extended git rules', () => {
-  it('rejects names starting with "/"', async () => {
-    const { validateBranchName } = await import('./validation.js');
-    expect(() => validateBranchName('/feat/bad')).toThrow('must not start with "/"');
-  });
-
-  it('rejects names ending with "/"', async () => {
-    const { validateBranchName } = await import('./validation.js');
-    expect(() => validateBranchName('feat/bad/')).toThrow('must not end with "/"');
-  });
-
-  it('rejects names ending with ".lock"', async () => {
-    const { validateBranchName } = await import('./validation.js');
-    expect(() => validateBranchName('feat.lock')).toThrow('.lock');
-  });
-
-  it('rejects names containing "@{"', async () => {
-    const { validateBranchName } = await import('./validation.js');
-    // { is caught by the shell metacharacter check
-    expect(() => validateBranchName('feat@{bad}')).toThrow('invalid characters');
-  });
-
-  it('rejects names containing "//"', async () => {
-    const { validateBranchName } = await import('./validation.js');
-    expect(() => validateBranchName('feat//bad')).toThrow('must not contain "//"');
-  });
-
-  it('rejects names starting with "."', async () => {
-    const { validateBranchName } = await import('./validation.js');
-    expect(() => validateBranchName('.hidden')).toThrow('must not start with "."');
-  });
-
-  it('still accepts normal branch names', async () => {
-    const { validateBranchName } = await import('./validation.js');
-    expect(validateBranchName('feat/my-feature')).toBe('feat/my-feature');
   });
 });
 

@@ -34,7 +34,7 @@ import {
 import { dataTransferToShellArgs, escapePath } from '../lib/terminalDrop';
 import { cleanCopiedTerminalText } from '../lib/copy-text';
 import { hasTerminalUserActivity, nextTerminalInputPending } from '../lib/terminalInputPending';
-import { createTerminalHttpLinkHandler } from '../lib/terminalLinks';
+import { computeWrappedPathLinks, createTerminalHttpLinkHandler } from '../lib/terminalLinks';
 import type { PtyOutput } from '../ipc/types';
 
 let windowUnloading = false;
@@ -115,6 +115,10 @@ interface TerminalViewProps {
   cwd: string;
   env?: Record<string, string>;
   isShell?: boolean;
+  /** Scroll bookmarks reserve a 24px left gutter. Only agent terminals use it;
+   *  shell terminals (in-task shells and standalone full-size panels) opt out
+   *  (pass false) so they fill the pane with no left inset. */
+  bookmarksEnabled?: boolean;
   stepsEnabled?: boolean;
   dockerMode?: boolean;
   dockerImage?: string;
@@ -454,31 +458,12 @@ export function TerminalView(props: TerminalViewProps) {
           callback(undefined);
           return;
         }
-        const line = term.buffer.active.getLine(y - 1)?.translateToString(true) ?? '';
-        // Match file paths: absolute, ./ or ../ relative, and bare relative with /
-        // Supports @scoped packages, line:col suffixes like foo.ts:42:10
-        const regex =
-          /(?:\/[\w@./-]+|\.{1,2}\/[\w@./-]+|[\w@][\w@./-]*\/[\w@./-]+)(?::\d+(?::\d+)?)?/g;
-        const links: { startIndex: number; length: number; text: string }[] = [];
-        let match: RegExpExecArray | null;
-        while ((match = regex.exec(line)) !== null) {
-          // Strip trailing punctuation that's not part of the path
-          const text = match[0].replace(/[.,;:!?)]+$/, '');
-          if (!text) continue;
-          // Must contain a dot somewhere (file extension) to avoid matching plain directories
-          if (!text.includes('.')) continue;
-          links.push({
-            startIndex: match.index,
-            length: text.length,
-            text,
-          });
-        }
+        // Reconstruct wrapped lines so a path that spans multiple rows stays a
+        // single clickable link across every row it occupies.
+        const links = computeWrappedPathLinks(term.buffer.active, y - 1);
         callback(
           links.map((link) => ({
-            range: {
-              start: { x: link.startIndex + 1, y },
-              end: { x: link.startIndex + link.length + 1, y },
-            },
+            range: link.range,
             text: link.text,
             activate(event: MouseEvent, _text: string) {
               // Require Cmd+click (Mac) or Ctrl+click (Linux) to open links
@@ -1138,30 +1123,46 @@ export function TerminalView(props: TerminalViewProps) {
   const mcpError = () => store.tasks[props.taskId]?.mcpStartupError;
   const mcpStatus = () => store.tasks[props.taskId]?.mcpStartupStatus;
 
+  // Reserve the bookmark gutter only when bookmarks are enabled AND the terminal
+  // is on the normal buffer. Shell terminals (in-task shells and standalone
+  // full-size panels) opt out via the prop. Agent terminals opt in, but a
+  // full-screen TUI (e.g. Claude Code) switches to the alternate buffer, which
+  // has no scrollback to anchor a marker to — so we drop the inset there and give
+  // the pane its full width back instead of stranding an empty 24px strip.
+  // Driven by overviewTick (bumped on alt<->normal switches); the memo only
+  // re-renders the layout on a real buffer flip, not on every streaming frame.
+  const reserveGutter = createMemo(() => {
+    if (props.bookmarksEnabled === false) return false;
+    overviewTick();
+    return !term || term.buffer.active.type === 'normal';
+  });
+
   return (
     <div style={{ position: 'relative', width: '100%', height: '100%' }}>
-      <TerminalBookmarkGutter
-        width={BOOKMARK_GUTTER_WIDTH}
-        bookmarks={bookmarks()}
-        topOf={bookmarkTopPx}
-        onJump={jumpToBookmark}
-        onRemove={removeBookmark}
-        aboveCount={bookmarkLayout().aboveCount}
-        aboveTop={bookmarkLayout().aboveTop}
-        belowCount={bookmarkLayout().belowCount}
-        belowTop={bookmarkLayout().belowTop}
-        onJumpAbove={jumpAboveOverflow}
-        onJumpBelow={jumpBelowOverflow}
-        createVisible={selectionActive()}
-        createTop={selectionButtonTop()}
-        onCreate={addBookmarkFromSelection}
-      />
+      <Show when={reserveGutter()}>
+        <TerminalBookmarkGutter
+          width={BOOKMARK_GUTTER_WIDTH}
+          bookmarks={bookmarks()}
+          topOf={bookmarkTopPx}
+          onJump={jumpToBookmark}
+          onRemove={removeBookmark}
+          aboveCount={bookmarkLayout().aboveCount}
+          aboveTop={bookmarkLayout().aboveTop}
+          belowCount={bookmarkLayout().belowCount}
+          belowTop={bookmarkLayout().belowTop}
+          onJumpAbove={jumpAboveOverflow}
+          onJumpBelow={jumpBelowOverflow}
+          createVisible={selectionActive()}
+          createTop={selectionButtonTop()}
+          onCreate={addBookmarkFromSelection}
+        />
+      </Show>
       <div
         ref={containerRef}
         style={{
-          width: `calc(100% - ${BOOKMARK_GUTTER_WIDTH}px)`,
+          width: reserveGutter() ? `calc(100% - ${BOOKMARK_GUTTER_WIDTH}px)` : '100%',
           height: '100%',
-          'margin-left': `${BOOKMARK_GUTTER_WIDTH}px`,
+          'margin-left': reserveGutter() ? `${BOOKMARK_GUTTER_WIDTH}px` : '0',
           overflow: 'hidden',
           padding: '4px 0 0 4px',
           contain: 'strict',

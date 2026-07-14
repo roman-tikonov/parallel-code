@@ -24,7 +24,6 @@ import { HelpDialog } from './components/HelpDialog';
 import { SettingsDialog } from './components/SettingsDialog';
 import { WindowTitleBar } from './components/WindowTitleBar';
 import { FocusModeTaskIndicators } from './components/FocusModeTaskIndicators';
-import { WindowResizeHandles } from './components/WindowResizeHandles';
 import { theme } from './lib/theme';
 import * as log from './lib/log';
 import {
@@ -82,9 +81,11 @@ import { isMac, mod } from './lib/platform';
 import { createCtrlWheelZoomHandler } from './lib/wheelZoom';
 import { redrawAllTerminals } from './lib/terminalFitManager';
 import { ArenaOverlay } from './arena/ArenaOverlay';
+import { resetForNewMatch } from './arena/store';
 import { startDesktopNotificationWatcher } from './store/desktopNotifications';
 import { startPrChecksSubscription } from './store/pr-checks';
 import { startUpdateSubscription } from './store/updates';
+import { startRemoteTaskHandlers } from './store/remoteTaskHandler';
 
 const MIN_WINDOW_DIMENSION = 100;
 
@@ -143,6 +144,11 @@ function App() {
   const [windowMaximized, setWindowMaximized] = createSignal(false);
   const [showDropOverlay, setShowDropOverlay] = createSignal(false);
   let dragCounter = 0;
+
+  function closeArena() {
+    void resetForNewMatch();
+    toggleArena(false);
+  }
 
   function extractGitHubUrl(dt: DataTransfer): string | null {
     const uriList = dt.getData('text/uri-list');
@@ -318,17 +324,6 @@ function App() {
   });
 
   onMount(async () => {
-    if (isMac) {
-      await appWindow.setTitleBarStyle('overlay').catch((error) => {
-        console.warn('Failed to enable macOS overlay titlebar', error);
-      });
-    } else {
-      // Keep native titlebar on macOS, use custom frameless chrome elsewhere.
-      await appWindow.setDecorations(false).catch((error) => {
-        console.warn('Failed to disable native decorations', error);
-      });
-    }
-
     void syncWindowFocused();
     void syncWindowMaximized();
 
@@ -530,6 +525,7 @@ function App() {
     const stopNotificationWatcher = startDesktopNotificationWatcher(windowFocused);
     const stopPrChecksSubscription = startPrChecksSubscription();
     const stopUpdateSubscription = startUpdateSubscription();
+    const stopRemoteTaskHandlers = startRemoteTaskHandlers();
 
     // Listen for plan content pushed from backend plan watcher
     const offPlanContent = window.electron.ipcRenderer.on(IPC.PlanContent, (data: unknown) => {
@@ -544,7 +540,7 @@ function App() {
     const offStepsContent = window.electron.ipcRenderer.on(IPC.StepsContent, (data: unknown) => {
       if (!data || typeof data !== 'object') return;
       const msg = data as { taskId: string; steps: unknown[] | null };
-      console.warn('[steps.recv]', msg.taskId, 'len=', msg.steps?.length ?? 'null');
+      log.debug('steps', 'recv', { taskId: msg.taskId, len: msg.steps?.length ?? null });
       if (msg.taskId && store.tasks[msg.taskId]) {
         setStepsContent(msg.taskId, msg.steps);
       }
@@ -681,7 +677,10 @@ function App() {
       toggleHelp: () => toggleHelpDialog(),
       toggleSettings: () => toggleSettingsDialog(),
       closeDialogs: () => {
-        if (store.showArena) return;
+        if (store.showArena) {
+          closeArena();
+          return;
+        }
         if (store.showHelpDialog) {
           toggleHelpDialog(false);
           return;
@@ -723,6 +722,7 @@ function App() {
       stopNotificationWatcher();
       stopPrChecksSubscription();
       stopUpdateSubscription();
+      stopRemoteTaskHandlers();
       offPlanContent();
       offStepsContent();
       unlistenFocusChanged?.();
@@ -922,16 +922,13 @@ function App() {
             onClose={() => toggleNewTaskDialog(false)}
           />
         </main>
-        <Show when={!isMac}>
-          <WindowResizeHandles />
-        </Show>
         <HelpDialog open={store.showHelpDialog} onClose={() => toggleHelpDialog(false)} />
         <SettingsDialog
           open={store.showSettingsDialog}
           onClose={() => toggleSettingsDialog(false)}
         />
         <Show when={store.showArena}>
-          <ArenaOverlay onClose={() => toggleArena(false)} />
+          <ArenaOverlay onClose={closeArena} />
         </Show>
         <Show when={showDropOverlay()}>
           <DropOverlay />

@@ -98,6 +98,7 @@ export {
   toggleHelpDialog,
   toggleSettingsDialog,
   sendActivePrompt,
+  scrollTaskElementIntoView,
 } from './focus';
 export type { PanelId, PendingAction, TaskViewportVisibility } from './types';
 export { saveState, loadState, loadCustomThemes } from './persistence';
@@ -178,7 +179,12 @@ export {
   updateTerminalName,
   syncTerminalCounter,
 } from './terminals';
-export { startRemoteAccess, stopRemoteAccess, refreshRemoteStatus } from './remote';
+export {
+  startRemoteAccess,
+  stopRemoteAccess,
+  refreshRemoteStatus,
+  setAutoStartRemoteAccess,
+} from './remote';
 export {
   updateStatus,
   startUpdateSubscription,
