@@ -33,6 +33,7 @@ import {
 } from '../lib/terminalFitManager';
 import { dataTransferToShellArgs, escapePath } from '../lib/terminalDrop';
 import { cleanCopiedTerminalText } from '../lib/copy-text';
+import { parseOsc52 } from '../lib/osc52';
 import { hasTerminalUserActivity, nextTerminalInputPending } from '../lib/terminalInputPending';
 import { computeWrappedPathLinks, createTerminalHttpLinkHandler } from '../lib/terminalLinks';
 import type { PtyOutput } from '../ipc/types';
@@ -431,6 +432,31 @@ export function TerminalView(props: TerminalViewProps) {
         activate: openTerminalHttpLinkWithModifier,
         allowNonHttpProtocols: false,
       },
+    });
+
+    // OSC 52 ("manipulate selection data") — the copy path for TUI agents.
+    //
+    // Agents like Claude Code and Codex enable mouse reporting, so a drag goes to
+    // the agent, not to xterm: they run their own selection and then hand the text
+    // to the terminal by emitting OSC 52, reporting "sent N chars via OSC 52".
+    // xterm's core parser registers OSC 0/1/2/4/8/10/11/12/104/110/111/112 but
+    // deliberately leaves 52 unhandled, so without this the sequence is dropped on
+    // the floor — the agent believes it copied and the system clipboard never
+    // changes. A plain shell doesn't use OSC 52, which is why only agent panes
+    // appeared to have a broken copy.
+    //
+    // See parseOsc52() for the payload grammar and why clipboard reads are refused.
+    term.parser.registerOscHandler(52, (data) => {
+      const req = parseOsc52(data);
+      if (req.kind === 'unhandled') return false;
+      if (req.kind === 'write') {
+        // Deliberately not run through cleanCopiedTerminalText(): the agent sends
+        // exactly the text it means, with no terminal padding to strip.
+        navigator.clipboard.writeText(req.text).catch((err: unknown) => {
+          logWarn('terminal.osc52', 'clipboard write failed', { err });
+        });
+      }
+      return true;
     });
 
     fitAddon = new FitAddon();
