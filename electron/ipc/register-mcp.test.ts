@@ -314,11 +314,18 @@ const VALID_ARGS = {
   worktreePath: '/absolute/worktree',
   agentArgs: ['--flag', 'value'],
   dockerContainerName: 'my-container',
+  shareDockerAgentAuth: true,
 };
 
 describe('Layer 4 — StartMCPServer input validation', () => {
   it('accepts valid args without throwing', () => {
     expect(() => validateStartMCPServerArgs(VALID_ARGS)).not.toThrow();
+  });
+
+  it('rejects non-boolean shareDockerAgentAuth', () => {
+    expect(() =>
+      validateStartMCPServerArgs({ ...VALID_ARGS, shareDockerAgentAuth: 'true' }),
+    ).toThrow('shareDockerAgentAuth must be a boolean or undefined');
   });
 
   it('rejects non-absolute projectRoot', () => {

@@ -223,6 +223,7 @@ export async function createTask(opts: CreateTaskOptions): Promise<string> {
         agentArgs: agentDef.args,
         dockerContainerName,
         dockerImage,
+        shareDockerAgentAuth: store.shareDockerAgentAuth,
       });
       mcpConfigPath = mcpResult.configPath ?? undefined;
       mcpLaunchArgs = mcpResult.mcpLaunchArgs;
@@ -1415,6 +1416,7 @@ export function retryTaskMcpStartup(taskId: string): Promise<void> {
       agentArgs: agentDef?.args ?? [],
       dockerContainerName,
       dockerImage: task.dockerImage,
+      shareDockerAgentAuth: store.shareDockerAgentAuth,
     })
       .then((result) => {
         applyTaskMcpLaunchResult(taskId, result);

@@ -198,6 +198,7 @@ export function validateStartMCPServerArgs(args: Record<string, unknown>): void 
   if (args.agentArgs !== undefined) assertStringArray(args.agentArgs, 'agentArgs');
   assertOptionalBoolean(args.skipPermissions, 'skipPermissions');
   assertOptionalBoolean(args.propagateSkipPermissions, 'propagateSkipPermissions');
+  assertOptionalBoolean(args.shareDockerAgentAuth, 'shareDockerAgentAuth');
   if (args.dockerContainerName !== undefined) {
     assertString(args.dockerContainerName, 'dockerContainerName');
     if (!/^[a-zA-Z0-9_.-]+$/.test(args.dockerContainerName as string)) {
@@ -1527,6 +1528,7 @@ export function registerAllHandlers(win: BrowserWindow): void {
         agentArgs?: string[];
         dockerContainerName?: string;
         dockerImage?: string;
+        shareDockerAgentAuth?: boolean;
       },
     ) => {
       validateStartMCPServerArgs(args as unknown as Record<string, unknown>);
@@ -1666,6 +1668,10 @@ export function registerAllHandlers(win: BrowserWindow): void {
         fs.copyFileSync(hostMcpServerPath, dockerMcpServerPath); // nosemgrep: semgrep.copyfilesync-side-effect -- all pure computation (mcpConfig, mergedMcpJson) is done above; this is correctly ordered
         coordinator.setDockerContainerName(args.coordinatorTaskId, args.dockerContainerName ?? '');
         coordinator.setDockerImage(args.coordinatorTaskId, args.dockerImage ?? null);
+        coordinator.setShareDockerAgentAuth(
+          args.coordinatorTaskId,
+          args.shareDockerAgentAuth === true,
+        );
         console.warn('[MCP] Docker mode: copied MCP server to', dockerMcpServerPath);
         // Keep .parallel-code/ out of git status in the sub-task worktree.
         // Use .git/info/exclude (local-only, never committed) to avoid dirtying
@@ -1677,6 +1683,7 @@ export function registerAllHandlers(win: BrowserWindow): void {
         );
       } else {
         coordinator.setDockerContainerName(args.coordinatorTaskId, null);
+        coordinator.setShareDockerAgentAuth(args.coordinatorTaskId, false);
       }
 
       coordinator.setMCPServerInfo(

@@ -646,6 +646,13 @@ export class Coordinator {
     }
   }
 
+  setShareDockerAgentAuth(coordinatorTaskId: string, enabled: boolean): void {
+    const state = this.coordinators.get(coordinatorTaskId);
+    if (state) {
+      state.shareDockerAgentAuth = enabled;
+    }
+  }
+
   private maybeQueueReviewNotification(
     task: CoordinatedTask,
     state: 'idle' | 'exited',
@@ -1015,6 +1022,7 @@ export class Coordinator {
           ? {
               dockerMode: true,
               dockerImage: coordinatorState.dockerImage ?? undefined,
+              shareDockerAgentAuth: coordinatorState.shareDockerAgentAuth === true,
               // Mount parent dir so the sub-task can reach the coordinator's
               // .parallel-code/ dir (which holds the per-sub-task MCP config).
               // resolveWorktreeGitDirMount adds the main .git dir mount.
@@ -2134,6 +2142,7 @@ export class Coordinator {
       worktreePath: opts?.worktreePath,
       mcpServerInfo: null,
       spawnDefaults: { ...this.coordinatorSpawnDefaults },
+      shareDockerAgentAuth: false,
       pendingNotifications: [],
       stagedBatches: new Map(),
       ackedBatchIds: [],

@@ -422,6 +422,7 @@ function App() {
           agentArgs: agentDef?.args ?? [],
           dockerContainerName,
           dockerImage: task.dockerMode ? task.dockerImage : undefined,
+          shareDockerAgentAuth: store.shareDockerAgentAuth,
         })
           .then((result) => {
             applyTaskMcpLaunchResult(taskId, result);

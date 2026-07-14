@@ -5395,6 +5395,18 @@ describe('Coordinator Docker mode — per-container sub-tasks', () => {
     expect(spawnCall.dockerImage).toBe('parallel-code-agent:latest');
   });
 
+  it('createTask passes shared Docker agent auth to spawnAgent', async () => {
+    coordinator.setShareDockerAgentAuth('coord-docker', true);
+
+    await coordinator.createTask({
+      name: 'docker-sub-task',
+      coordinatorTaskId: 'coord-docker',
+    });
+
+    const spawnCall = mockSpawnAgent.mock.calls[0][1];
+    expect(spawnCall.shareDockerAgentAuth).toBe(true);
+  });
+
   it('createTask sets dockerMountWorktreeParent: true so coordinator .parallel-code/ is accessible', async () => {
     await coordinator.createTask({
       name: 'docker-sub-task',

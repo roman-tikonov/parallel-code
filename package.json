@@ -159,5 +159,11 @@
       "entitlements": "build/entitlements.mac.plist",
       "entitlementsInherit": "build/entitlements.mac.plist"
     }
+  },
+  "allowScripts": {
+    "esbuild@0.28.1": true,
+    "electron@40.8.5": true,
+    "node-pty@1.1.0": true,
+    "fsevents@2.3.3": true
   }
 }

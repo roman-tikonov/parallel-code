@@ -69,6 +69,8 @@ export interface CoordinatorState {
   dockerContainerName?: string | null;
   /** Docker image used by this coordinator. Sub-tasks spawn their own containers using this same image. */
   dockerImage?: string | null;
+  /** Whether Docker sub-task containers should mount writable per-agent auth directories. */
+  shareDockerAgentAuth?: boolean;
   /** Per-coordinator MCP server info; set after the remote server starts. */
   mcpServerInfo: {
     serverUrl: string;
