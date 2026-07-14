@@ -11,6 +11,19 @@ List fork-only commits: `git fork-log`
 
 ## Active patches
 
+### Honor OSC 52 so agent panes can copy (`6267dfe`)
+
+TUI agents (Claude Code, Codex) enable mouse reporting, so they own selection
+and hand copied text to the terminal via OSC 52. xterm's core parser leaves 52
+unhandled and `@xterm/addon-clipboard` isn't a dependency, so the sequence was
+dropped: the agent reported "sent N chars via OSC 52" while the system clipboard
+never changed. Adds `src/lib/osc52.ts` (payload parser, UTF-8 decode) and
+registers an OSC 52 handler in `TerminalView`. Clipboard *reads* (`?` payload)
+are swallowed rather than answered, so anything writing to the PTY cannot
+exfiltrate the clipboard.
+
+Upstreamable. Drop when upstream merges an equivalent.
+
 ### Share Docker agent auth with MCP sub-tasks (`6fa97d8`)
 
 Sub-task containers spawned by an MCP coordinator now inherit the
