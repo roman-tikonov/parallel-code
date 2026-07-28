@@ -86,6 +86,7 @@ import { startDesktopNotificationWatcher } from './store/desktopNotifications';
 import { startPrChecksSubscription } from './store/pr-checks';
 import { startUpdateSubscription } from './store/updates';
 import { startRemoteTaskHandlers } from './store/remoteTaskHandler';
+import { startRemoteStatusSync } from './store/remoteStatusSync';
 
 const MIN_WINDOW_DIMENSION = 100;
 
@@ -526,6 +527,7 @@ function App() {
     const stopPrChecksSubscription = startPrChecksSubscription();
     const stopUpdateSubscription = startUpdateSubscription();
     const stopRemoteTaskHandlers = startRemoteTaskHandlers();
+    const stopRemoteStatusSync = startRemoteStatusSync();
 
     // Listen for plan content pushed from backend plan watcher
     const offPlanContent = window.electron.ipcRenderer.on(IPC.PlanContent, (data: unknown) => {
@@ -723,6 +725,7 @@ function App() {
       stopPrChecksSubscription();
       stopUpdateSubscription();
       stopRemoteTaskHandlers();
+      stopRemoteStatusSync();
       offPlanContent();
       offStepsContent();
       unlistenFocusChanged?.();

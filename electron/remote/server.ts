@@ -18,7 +18,12 @@ import {
   getAgentCols,
   onPtyEvent,
 } from '../ipc/pty.js';
-import { parseClientMessage, type ServerMessage, type RemoteAgent } from './protocol.js';
+import {
+  parseClientMessage,
+  type ServerMessage,
+  type RemoteAgent,
+  type RemoteAttentionState,
+} from './protocol.js';
 import type { Coordinator } from '../mcp/coordinator.js';
 import { validateBranchName } from '../mcp/validation.js';
 import type { ApiTaskDetail, LandSelfInput, SubtaskVerification } from '../mcp/types.js';
@@ -33,6 +38,7 @@ export interface MCPLogEntry {
 const MAX_LOG_ENTRIES = 200;
 const REST_COORDINATOR_SENTINEL = 'api';
 const MAX_REST_PROMPT_BYTES = 16 * 1024;
+const MAX_NOTES_BYTES = 100 * 1024;
 // Device pairing: a mobile client proves it can see the desktop by entering a
 // short-lived PIN, which elevates it to a "paired" token allowed to create tasks.
 const PAIRING_PIN_TTL_MS = 5 * 60_000;
@@ -210,6 +216,7 @@ function buildAgentList(
     exitCode: number | null;
     lastLine: string;
   },
+  getTaskAttention: (taskId: string) => RemoteAttentionState,
 ): RemoteAgent[] {
   const byTask = new Map<string, RemoteAgent>();
   for (const agentId of getActiveAgentIds()) {
@@ -225,6 +232,7 @@ function buildAgentList(
       status: info.status,
       exitCode: info.exitCode,
       lastLine: info.lastLine,
+      attention: getTaskAttention(meta.taskId),
     };
     // Prefer running agents over exited ones for the same task
     const existing = byTask.get(meta.taskId);
@@ -661,7 +669,18 @@ export function startRemoteServer(opts: {
     name: string;
     prompt: string;
   }) => Promise<{ taskId: string }>;
+  /** Read a task's notes (renderer-backed). */
+  getTaskNotes?: (taskId: string) => Promise<string>;
+  /** Persist a task's notes (renderer-backed). */
+  setTaskNotes?: (taskId: string, notes: string) => Promise<void>;
+  /** Renderer-derived task attention state (needs input, working, ready, …). */
+  getTaskAttention?: (taskId: string) => RemoteAttentionState;
 }): Promise<RemoteServer> {
+  // Defensive default for the optional signature: every real caller wires
+  // attention via mobileTaskBridge, so 'idle' is only used if a future caller
+  // omits it.
+  const getTaskAttention: (taskId: string) => RemoteAttentionState =
+    opts.getTaskAttention ?? (() => 'idle');
   const token = randomBytes(24).toString('base64url');
   const subtaskToken = randomBytes(24).toString('base64url');
   const mobileToken = randomBytes(24).toString('base64url');
@@ -822,6 +841,64 @@ export function startRemoteServer(opts: {
         return jsonEnd(405, { error: 'method not allowed' });
       }
 
+      // --- Task notes (mobile + paired) ---
+      // Read/write the notes textarea shown on the desktop task panel. Available
+      // to the read-only mobile token too: editing notes is low-risk and mirrors
+      // the "interact with your terminals" capability the mobile token already has.
+      const notesMatch = url.pathname.match(/^\/api\/mobile\/notes\/([^/]+)$/);
+      if (notesMatch) {
+        if (tokenClass !== 'mobile' && tokenClass !== 'paired')
+          return jsonEnd(403, { error: 'forbidden' });
+        // decodeURIComponent throws URIError on a malformed escape (e.g. "%").
+        // This handler has no outer try/catch, so an unguarded throw here would
+        // take down the main process — reject with 400 instead.
+        let taskId: string;
+        try {
+          taskId = decodeURIComponent(notesMatch[1]);
+        } catch {
+          return jsonEnd(400, { error: 'invalid task id' });
+        }
+        // Reject prototype-chain keys at the boundary. The renderer also guards
+        // with Object.hasOwn, but blocking here keeps a mobile-token request
+        // from ever reaching a setStore path with a dangerous key.
+        if (taskId === '__proto__' || taskId === 'constructor' || taskId === 'prototype') {
+          return jsonEnd(400, { error: 'invalid task id' });
+        }
+
+        if (req.method === 'GET') {
+          if (!opts.getTaskNotes) return jsonEnd(503, { error: 'notes unavailable' });
+          opts
+            .getTaskNotes(taskId)
+            .then((notes) => jsonEnd(200, { notes }))
+            .catch((err) => jsonEnd(500, { error: String(err) }));
+          return;
+        }
+
+        if (req.method === 'PUT') {
+          const setTaskNotes = opts.setTaskNotes;
+          if (!setTaskNotes) return jsonEnd(503, { error: 'notes unavailable' });
+          // Cap the body generously above MAX_NOTES_BYTES so the precise byte
+          // check below is the effective limit (readJsonBody's 64 KB default
+          // would otherwise reject valid large notes with a generic "Body too
+          // large"). The 2x headroom covers JSON escaping of quotes/newlines in
+          // a full-size note; the exact limit is enforced on the decoded string.
+          readJsonBody(req, MAX_NOTES_BYTES * 2 + 4096)
+            .then((body) => {
+              if (typeof body.notes !== 'string')
+                return jsonEnd(400, { error: 'notes must be a string' });
+              if (Buffer.byteLength(body.notes, 'utf8') > MAX_NOTES_BYTES)
+                return jsonEnd(400, { error: `notes must be ${MAX_NOTES_BYTES} bytes or fewer` });
+              setTaskNotes(taskId, body.notes)
+                .then(() => jsonEnd(200, { ok: true }))
+                .catch((err) => jsonEnd(500, { error: String(err) }));
+            })
+            .catch(() => jsonEnd(400, { error: 'bad request' }));
+          return;
+        }
+
+        return jsonEnd(405, { error: 'method not allowed' });
+      }
+
       if (tokenClass === 'subtask') {
         const allowed =
           req.method === 'POST' && /^\/api\/tasks\/[^/]+\/(?:done|land)$/.test(url.pathname);
@@ -850,7 +927,7 @@ export function startRemoteServer(opts: {
       }
 
       if (url.pathname === '/api/agents' && req.method === 'GET') {
-        const list = buildAgentList(opts.getTaskName, opts.getAgentStatus);
+        const list = buildAgentList(opts.getTaskName, opts.getAgentStatus, getTaskAttention);
         res.writeHead(200, { ...SECURITY_HEADERS, 'Content-Type': 'application/json' });
         res.end(JSON.stringify(list));
         return;
@@ -1044,12 +1121,12 @@ export function startRemoteServer(opts: {
   }
 
   const unsubSpawn = onPtyEvent('spawn', () => {
-    const list = buildAgentList(opts.getTaskName, opts.getAgentStatus);
+    const list = buildAgentList(opts.getTaskName, opts.getAgentStatus, getTaskAttention);
     broadcast({ type: 'agents', list });
   });
 
   const unsubListChanged = onPtyEvent('list-changed', () => {
-    const list = buildAgentList(opts.getTaskName, opts.getAgentStatus);
+    const list = buildAgentList(opts.getTaskName, opts.getAgentStatus, getTaskAttention);
     broadcast({ type: 'agents', list });
   });
 
@@ -1061,7 +1138,7 @@ export function startRemoteServer(opts: {
       clientSubs.get(client)?.delete(agentId);
     }
     setTimeout(() => {
-      const list = buildAgentList(opts.getTaskName, opts.getAgentStatus);
+      const list = buildAgentList(opts.getTaskName, opts.getAgentStatus, getTaskAttention);
       broadcast({ type: 'agents', list });
     }, 100);
   });
@@ -1074,7 +1151,7 @@ export function startRemoteServer(opts: {
     if (classifyToken(req) === 'coordinator') {
       authenticatedClients.add(ws);
       clientTokenTypes.set(ws, 'coordinator');
-      const list = buildAgentList(opts.getTaskName, opts.getAgentStatus);
+      const list = buildAgentList(opts.getTaskName, opts.getAgentStatus, getTaskAttention);
       ws.send(JSON.stringify({ type: 'agents', list } satisfies ServerMessage));
     } else {
       // Close unauthenticated connections after 5 seconds
@@ -1099,7 +1176,7 @@ export function startRemoteServer(opts: {
           clientTokenTypes.set(ws, tokenType);
           const timer = authTimers.get(ws);
           if (timer) clearTimeout(timer);
-          const list = buildAgentList(opts.getTaskName, opts.getAgentStatus);
+          const list = buildAgentList(opts.getTaskName, opts.getAgentStatus, getTaskAttention);
           ws.send(JSON.stringify({ type: 'agents', list } satisfies ServerMessage));
         } else {
           ws.close(4001, 'Unauthorized');
