@@ -249,6 +249,7 @@ export interface PersistedState {
   mergedLinesAdded?: number;
   mergedLinesRemoved?: number;
   terminalFont?: string;
+  terminalScreenReaderMode?: boolean;
   themePreset?: LookPreset;
   showPromptInput?: boolean;
   fontSmoothing?: boolean;
@@ -257,6 +258,7 @@ export interface PersistedState {
   showPlans?: boolean;
   showSidebarTips?: boolean;
   showSidebarProgress?: boolean;
+  sidebarNeedsInputFirst?: boolean;
   projectsCollapsed?: boolean;
   desktopNotificationsEnabled?: boolean;
   inactiveColumnOpacity?: number;
@@ -265,6 +267,7 @@ export interface PersistedState {
   shareDockerAgentAuth?: boolean;
   askCodeProvider?: 'claude' | 'minimax';
   customAgents?: AgentDef[];
+  agentEnvFiles?: Record<string, string>;
   keybindingMigrationDismissed?: boolean;
   focusMode?: boolean;
   verboseLogging?: boolean;
@@ -322,6 +325,9 @@ export interface AppStore {
   activeAgentId: string | null;
   availableAgents: AgentDef[];
   customAgents: AgentDef[];
+  /** Agent id → path of a `KEY=VALUE` file merged into that agent's environment
+   *  at spawn. Only the path is stored here; secrets stay in the file on disk. */
+  agentEnvFiles: Record<string, string>;
   showNewTaskDialog: boolean;
   sidebarVisible: boolean;
   /** User-dragged sizes keyed by `${persistKey}:${childId}`. Presence of an
@@ -346,6 +352,7 @@ export interface AppStore {
   mergedLinesAdded: number;
   mergedLinesRemoved: number;
   terminalFont: string;
+  terminalScreenReaderMode: boolean;
   themePreset: LookPreset;
   showPromptInput: boolean;
   fontSmoothing: boolean;
@@ -354,6 +361,9 @@ export interface AppStore {
   showPlans: boolean;
   showSidebarTips: boolean;
   showSidebarProgress: boolean;
+  /** Pin tasks that are waiting on an answer to the top of the sidebar task
+   *  list, newest question first. */
+  sidebarNeedsInputFirst: boolean;
   projectsCollapsed: boolean;
   desktopNotificationsEnabled: boolean;
   inactiveColumnOpacity: number;

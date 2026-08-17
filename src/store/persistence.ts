@@ -183,6 +183,7 @@ export async function saveState(): Promise<void> {
     mergedLinesAdded: store.mergedLinesAdded,
     mergedLinesRemoved: store.mergedLinesRemoved,
     terminalFont: store.terminalFont,
+    terminalScreenReaderMode: store.terminalScreenReaderMode || undefined,
     themePreset: store.themePreset,
     showPromptInput: store.showPromptInput,
     fontSmoothing: store.fontSmoothing,
@@ -191,6 +192,7 @@ export async function saveState(): Promise<void> {
     showPlans: store.showPlans,
     showSidebarTips: store.showSidebarTips,
     showSidebarProgress: store.showSidebarProgress,
+    sidebarNeedsInputFirst: store.sidebarNeedsInputFirst,
     projectsCollapsed: store.projectsCollapsed,
     desktopNotificationsEnabled: store.desktopNotificationsEnabled,
     inactiveColumnOpacity: store.inactiveColumnOpacity,
@@ -198,6 +200,8 @@ export async function saveState(): Promise<void> {
     dockerImage: store.dockerImage !== 'parallel-code-agent:latest' ? store.dockerImage : undefined,
     askCodeProvider: store.askCodeProvider !== 'claude' ? store.askCodeProvider : undefined,
     customAgents: store.customAgents.length > 0 ? [...store.customAgents] : undefined,
+    agentEnvFiles:
+      Object.keys(store.agentEnvFiles).length > 0 ? { ...store.agentEnvFiles } : undefined,
     keybindingMigrationDismissed: store.keybindingMigrationDismissed || undefined,
     focusMode: store.focusMode || undefined,
     verboseLogging: store.verboseLogging || undefined,
@@ -351,6 +355,7 @@ interface LegacyPersistedState {
   mergedLinesAdded?: unknown;
   mergedLinesRemoved?: unknown;
   terminalFont?: unknown;
+  terminalScreenReaderMode?: unknown;
   themePreset?: unknown;
   showPromptInput?: unknown;
   fontSmoothing?: unknown;
@@ -360,6 +365,7 @@ interface LegacyPersistedState {
   showSteps?: unknown;
   showSidebarTips?: unknown;
   showSidebarProgress?: unknown;
+  sidebarNeedsInputFirst?: unknown;
   projectsCollapsed?: unknown;
   desktopNotificationsEnabled?: unknown;
   inactiveColumnOpacity?: unknown;
@@ -368,6 +374,7 @@ interface LegacyPersistedState {
   askCodeProvider?: unknown;
   minimaxApiKey?: unknown;
   customAgents?: unknown;
+  agentEnvFiles?: unknown;
   terminals?: unknown;
   keybindingMigrationDismissed?: unknown;
   focusMode?: unknown;
@@ -497,6 +504,8 @@ export async function loadState(): Promise<void> {
         typeof raw.terminalFont === 'string' && raw.terminalFont.trim()
           ? raw.terminalFont
           : DEFAULT_TERMINAL_FONT;
+      s.terminalScreenReaderMode =
+        typeof raw.terminalScreenReaderMode === 'boolean' ? raw.terminalScreenReaderMode : false;
       s.themePreset = isLookPreset(raw.themePreset) ? raw.themePreset : 'minimal';
       s.showPromptInput = typeof raw.showPromptInput === 'boolean' ? raw.showPromptInput : true;
       s.fontSmoothing = typeof raw.fontSmoothing === 'boolean' ? raw.fontSmoothing : true;
@@ -506,6 +515,8 @@ export async function loadState(): Promise<void> {
       s.showSidebarTips = typeof raw.showSidebarTips === 'boolean' ? raw.showSidebarTips : true;
       s.showSidebarProgress =
         typeof raw.showSidebarProgress === 'boolean' ? raw.showSidebarProgress : true;
+      s.sidebarNeedsInputFirst =
+        typeof raw.sidebarNeedsInputFirst === 'boolean' ? raw.sidebarNeedsInputFirst : true;
       s.projectsCollapsed =
         typeof raw.projectsCollapsed === 'boolean' ? raw.projectsCollapsed : false;
       s.desktopNotificationsEnabled =
@@ -609,6 +620,14 @@ export async function loadState(): Promise<void> {
             typeof (a as AgentDef).id === 'string' &&
             typeof (a as AgentDef).name === 'string' &&
             typeof (a as AgentDef).command === 'string',
+        );
+      }
+
+      if (raw.agentEnvFiles && typeof raw.agentEnvFiles === 'object') {
+        s.agentEnvFiles = Object.fromEntries(
+          Object.entries(raw.agentEnvFiles as Record<string, unknown>).filter(
+            (entry): entry is [string, string] => typeof entry[1] === 'string' && !!entry[1].trim(),
+          ),
         );
       }
 

@@ -86,6 +86,10 @@ export function setTerminalFont(terminalFont: string): void {
   setStore('terminalFont', terminalFont);
 }
 
+export function setTerminalScreenReaderMode(enabled: boolean): void {
+  setStore('terminalScreenReaderMode', enabled);
+}
+
 export function applyAppearanceMode(): void {
   const isDark = osIsDark();
   const mode = store.appearanceMode;
@@ -164,6 +168,10 @@ export function setShowSidebarTips(show: boolean): void {
 
 export function setShowSidebarProgress(show: boolean): void {
   setStore('showSidebarProgress', show);
+}
+
+export function setSidebarNeedsInputFirst(enabled: boolean): void {
+  setStore('sidebarNeedsInputFirst', enabled);
 }
 
 export function setProjectsCollapsed(collapsed: boolean): void {

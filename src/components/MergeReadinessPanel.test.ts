@@ -44,6 +44,7 @@ describe('buildMergeReadiness', () => {
     expect(readiness.checks).toEqual([
       expect.objectContaining({ label: 'Merge safety', status: 'pass' }),
       expect.objectContaining({ label: 'Verification', status: 'pass' }),
+      expect.objectContaining({ label: 'Coverage', status: 'neutral' }),
       expect.objectContaining({ label: 'PR checks', status: 'neutral' }),
     ]);
   });
@@ -153,7 +154,7 @@ describe('buildMergeReadiness', () => {
     expect(readiness.checks[1]).toEqual(
       expect.objectContaining({ status: 'warning', detail: 'test failed — 2 tests failed' }),
     );
-    expect(readiness.checks[2]).toEqual(
+    expect(readiness.checks[3]).toEqual(
       expect.objectContaining({ status: 'warning', detail: '1 pending, 2 passing.' }),
     );
   });
@@ -166,10 +167,286 @@ describe('buildMergeReadiness', () => {
     );
 
     expect(readiness.overall).toBe('attention');
-    expect(readiness.checks[2]).toEqual(
+    expect(readiness.checks[3]).toEqual(
       expect.objectContaining({
         status: 'warning',
         detail: '1 pending, 2 passing, 1 failing.',
+      }),
+    );
+  });
+
+  it('reports attention for aggregate coverage regression and impacted unchanged files', () => {
+    const readiness = buildMergeReadiness(
+      input({
+        coverage: {
+          aggregate: {
+            task: { state: 'available', pct: 78 },
+            base: { state: 'available', pct: 82 },
+            delta: -4,
+          },
+          files: {},
+          impactedUnchangedFiles: [
+            {
+              path: 'src/shared.ts',
+              task: { state: 'available', pct: 70 },
+              base: { state: 'available', pct: 80 },
+              delta: -10,
+            },
+          ],
+        },
+      }),
+    );
+
+    expect(readiness.overall).toBe('attention');
+    expect(readiness.checks[2]).toEqual(
+      expect.objectContaining({
+        label: 'Coverage',
+        status: 'warning',
+        detail: 'Base 82% → task 78% (-4pp). 1 unchanged file also regressed.',
+      }),
+    );
+  });
+
+  it('keeps an unchanged-file regression visible when aggregate coverage improves', () => {
+    const readiness = buildMergeReadiness(
+      input({
+        coverage: {
+          aggregate: {
+            task: { state: 'available', pct: 84 },
+            base: { state: 'available', pct: 82 },
+            delta: 2,
+          },
+          files: {},
+          impactedUnchangedFiles: [
+            {
+              path: 'src/shared.ts',
+              task: { state: 'available', pct: 70 },
+              base: { state: 'available', pct: 80 },
+              delta: -10,
+            },
+          ],
+        },
+      }),
+    );
+
+    expect(readiness.checks[2]).toEqual(
+      expect.objectContaining({
+        status: 'warning',
+        detail: 'Base 82% → task 84% (+2pp). 1 unchanged file also regressed.',
+      }),
+    );
+  });
+
+  it('does not attribute base-only covered files to the task', () => {
+    const readiness = buildMergeReadiness(
+      input({
+        coverage: {
+          aggregate: {
+            task: { state: 'available', pct: 82 },
+            base: { state: 'available', pct: 82 },
+            delta: 0,
+          },
+          files: {},
+          impactedUnchangedFiles: [
+            {
+              path: 'src/added-on-base.ts',
+              task: { state: 'file-not-present', pct: null },
+              base: { state: 'available', pct: 80 },
+              delta: null,
+            },
+          ],
+        },
+      }),
+    );
+
+    expect(readiness.overall).toBe('ready');
+    expect(readiness.checks[2]).toEqual(
+      expect.objectContaining({
+        status: 'pass',
+        detail: 'Base 82% → task 82% (0pp).',
+      }),
+    );
+  });
+
+  it('does not warn for aggregate drift below the materiality threshold', () => {
+    const readiness = buildMergeReadiness(
+      input({
+        coverage: {
+          aggregate: {
+            task: { state: 'available', pct: 81.99 },
+            base: { state: 'available', pct: 82 },
+            delta: -0.01,
+          },
+          files: {},
+          impactedUnchangedFiles: [],
+        },
+      }),
+    );
+
+    expect(readiness.overall).toBe('ready');
+    expect(readiness.checks[2]).toEqual(
+      expect.objectContaining({
+        status: 'pass',
+        detail: 'Base 82% → task 81.99% (-0.01pp).',
+      }),
+    );
+  });
+
+  it('warns when aggregate coverage reaches the materiality threshold', () => {
+    const readiness = buildMergeReadiness(
+      input({
+        coverage: {
+          aggregate: {
+            task: { state: 'available', pct: 81 },
+            base: { state: 'available', pct: 82 },
+            delta: -1,
+          },
+          files: {},
+          impactedUnchangedFiles: [],
+        },
+      }),
+    );
+
+    expect(readiness.checks[2]).toEqual(expect.objectContaining({ status: 'warning' }));
+  });
+
+  it('keeps coverage informational until an ahead base branch is rebased', () => {
+    const readiness = buildMergeReadiness(
+      input({
+        mergeStatus: { ...cleanMergeStatus, main_ahead_count: 2 },
+        coverage: {
+          aggregate: {
+            task: { state: 'available', pct: 78 },
+            base: { state: 'available', pct: 82 },
+            delta: -4,
+          },
+          files: {},
+          impactedUnchangedFiles: [],
+        },
+      }),
+    );
+
+    expect(readiness.checks[2]).toEqual(
+      expect.objectContaining({
+        status: 'neutral',
+        detail: 'main is 2 commits ahead; rebase and regenerate task coverage before comparing.',
+      }),
+    );
+  });
+
+  it('keeps a stale task report neutral even when its delta is negative', () => {
+    const readiness = buildMergeReadiness(
+      input({
+        coverage: {
+          aggregate: {
+            task: { state: 'available', pct: 78 },
+            base: { state: 'available', pct: 82 },
+            delta: -4,
+          },
+          files: {},
+          impactedUnchangedFiles: [],
+          baseline: {
+            baseBranch: 'main',
+            stale: false,
+            taskHeadAt: '2026-07-26T00:00:00.000Z',
+            taskStale: true,
+          },
+        },
+      }),
+    );
+
+    expect(readiness.checks[2]).toEqual(
+      expect.objectContaining({
+        status: 'neutral',
+        detail: 'Task coverage report predates task HEAD; regenerate it before comparing.',
+      }),
+    );
+  });
+
+  it.each([
+    ['loading', 'still loading'],
+    ['failed', 'unavailable'],
+  ] as const)(
+    'keeps task coverage visible but neutral when changed-file inventory is %s',
+    (inventoryState, detailFragment) => {
+      const readiness = buildMergeReadiness(
+        input({
+          coverage: {
+            aggregate: {
+              task: { state: 'available', pct: 78 },
+              base: { state: 'available', pct: 82 },
+              delta: -4,
+            },
+            files: {},
+            impactedUnchangedFiles: [],
+            inventoryState,
+          },
+        }),
+      );
+
+      expect(readiness.checks[2]).toEqual(expect.objectContaining({ status: 'neutral' }));
+      expect(readiness.checks[2].detail).toContain('Task 78%');
+      expect(readiness.checks[2].detail).toContain(detailFragment);
+      expect(readiness.checks[2].detail).not.toContain('No task coverage report');
+    },
+  );
+
+  it('keeps a stale base report neutral even when its delta is negative', () => {
+    const readiness = buildMergeReadiness(
+      input({
+        coverage: {
+          aggregate: {
+            task: { state: 'available', pct: 78 },
+            base: { state: 'available', pct: 82 },
+            delta: -4,
+          },
+          files: {},
+          impactedUnchangedFiles: [],
+          baseline: {
+            baseBranch: 'main',
+            baseHeadAt: '2026-07-26T00:00:00.000Z',
+            stale: true,
+          },
+        },
+      }),
+    );
+
+    expect(readiness.overall).toBe('ready');
+    expect(readiness.checks[2]).toEqual(
+      expect.objectContaining({
+        status: 'neutral',
+        detail:
+          'Base coverage report predates main as currently checked out; regenerate it before comparing.',
+      }),
+    );
+  });
+
+  it('keeps an unanchored base report neutral even when its delta is positive', () => {
+    const readiness = buildMergeReadiness(
+      input({
+        coverage: {
+          aggregate: {
+            task: { state: 'available', pct: 84 },
+            base: { state: 'available', pct: 82 },
+            delta: 2,
+          },
+          files: {},
+          impactedUnchangedFiles: [],
+          baseline: {
+            baseBranch: 'main',
+            stale: false,
+            unanchored: true,
+          },
+        },
+      }),
+    );
+
+    expect(readiness.overall).toBe('ready');
+    expect(readiness.checks[2]).toEqual(
+      expect.objectContaining({
+        status: 'neutral',
+        detail:
+          'Base coverage report cannot be anchored to main as currently checked out; comparison is informational only.',
       }),
     );
   });
@@ -185,6 +462,8 @@ describe('MergeReadinessPanel', () => {
     expect(html).toContain('Merge safety');
     expect(html).toContain('Verification');
     expect(html).toContain('2 checks passed.');
+    expect(html).toContain('Coverage');
+    expect(html).toContain('No task coverage report.');
     expect(html).toContain('PR checks');
     expect(html).toContain('No PR checks available.');
     expect(html).toContain(
@@ -198,6 +477,9 @@ describe('MergeReadinessPanel', () => {
     );
     expect(html).toContain(
       'title="Uses checks reported for a detected GitHub pull request. Pull requests are optional, and unavailable check data is neutral."',
+    );
+    expect(html).toContain(
+      'title="Compares existing task and base-branch coverage reports. Opening the dialog never runs tests or modifies either worktree."',
     );
   });
 });

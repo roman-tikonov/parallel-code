@@ -17,6 +17,7 @@ import { IPC } from '../electron/ipc/channels';
 import { appWindow } from './lib/window';
 import { choice } from './lib/dialog';
 import { CLOSE_DIALOG_BUTTONS, resolveCloseChoice } from './lib/close-decision';
+import { resolveShellCloseTarget } from './store/close-target';
 import { Sidebar } from './components/Sidebar';
 import { TilingLayout } from './components/TilingLayout';
 import { NewTaskDialog } from './components/NewTaskDialog';
@@ -65,6 +66,7 @@ import {
   markTaskMcpError,
 } from './store/store';
 import { isGitHubUrl } from './lib/github-url';
+import { HoldToQuit } from './components/HoldToQuit';
 import type { PersistedWindowState } from './store/types';
 import {
   initShortcuts,
@@ -144,6 +146,7 @@ function App() {
   const [windowFocused, setWindowFocused] = createSignal(true);
   const [windowMaximized, setWindowMaximized] = createSignal(false);
   const [showDropOverlay, setShowDropOverlay] = createSignal(false);
+  const [closeHandlerReady, setCloseHandlerReady] = createSignal(false);
   let dragCounter = 0;
 
   function closeArena() {
@@ -416,6 +419,7 @@ function App() {
           propagateSkipPermissions: task.propagateSkipPermissions ?? false,
           agentCommand: agentDef?.command ?? 'claude',
           agentArgs: agentDef?.args ?? [],
+          agentEnvFile: agentDef ? store.agentEnvFiles[agentDef.id] : undefined,
           dockerContainerName,
           dockerImage: task.dockerMode ? task.dockerImage : undefined,
           shareDockerAgentAuth: store.shareDockerAgentAuth,
@@ -625,6 +629,7 @@ function App() {
         handlingClose = false;
       }
     });
+    setCloseHandlerReady(true);
 
     const actionHandlers: Record<string, (e: KeyboardEvent) => void> = {
       'navigateRow:up': () => navigateRow('up'),
@@ -638,15 +643,14 @@ function App() {
       ...Object.fromEntries(
         Array.from({ length: 9 }, (_, i) => [`jumpToTask:${i + 1}`, () => jumpToTask(i)]),
       ),
-      closeShell: () => {
-        const taskId = store.activeTaskId;
-        if (!taskId) return;
-        const panel = store.focusedPanel[taskId] ?? '';
-        if (panel.startsWith('shell:')) {
-          const idx = parseInt(panel.slice(6), 10);
-          const shellId = store.tasks[taskId]?.shellAgentIds[idx];
-          if (shellId) closeShell(taskId, shellId);
-        }
+      closeShell: (e) => {
+        // Auto-repeat would walk the strip killing one pane per repeat:
+        // closeTerminal hands activeTaskId to the neighbor immediately.
+        if (e.repeat) return;
+        const target = resolveShellCloseTarget(store);
+        if (!target) return;
+        if (target.kind === 'terminal') closeTerminal(target.terminalId);
+        else closeShell(target.taskId, target.shellId);
       },
       closeTask: () => {
         const id = store.activeTaskId;
@@ -818,35 +822,18 @@ function App() {
         </Show>
         <Show when={!store.keybindingMigrationDismissed}>
           <div
-            style={{
-              background: theme.bgInput,
-              border: `1px solid ${theme.border}`,
-              'border-bottom': `1px solid ${theme.border}`,
-              padding: '8px 16px',
-              display: 'flex',
-              'align-items': 'center',
-              'justify-content': 'space-between',
-              'font-size': '13px',
-              color: theme.fg,
-              'flex-shrink': '0',
-            }}
+            class="keybinding-migration-notice"
+            role="region"
+            aria-label="Keyboard shortcuts update"
           >
             <span>
               Keyboard shortcuts are now configurable.{' '}
               <button
                 type="button"
+                class="keybinding-migration-notice-action"
                 onClick={() => {
                   toggleHelpDialog(true);
                   dismissMigrationBanner();
-                }}
-                style={{
-                  background: 'transparent',
-                  border: 'none',
-                  padding: '0',
-                  font: 'inherit',
-                  color: theme.accent,
-                  cursor: 'pointer',
-                  'text-decoration': 'underline',
                 }}
               >
                 Pick a preset for your coding agent
@@ -854,32 +841,18 @@ function App() {
               or{' '}
               <button
                 type="button"
+                class="keybinding-migration-notice-action secondary"
                 onClick={() => dismissMigrationBanner()}
-                style={{
-                  background: 'transparent',
-                  border: 'none',
-                  padding: '0',
-                  font: 'inherit',
-                  color: theme.fgMuted,
-                  cursor: 'pointer',
-                  'text-decoration': 'underline',
-                }}
               >
                 dismiss
               </button>
               .
             </span>
             <button
+              type="button"
+              class="keybinding-migration-notice-close"
+              aria-label="Dismiss keyboard shortcuts update"
               onClick={() => dismissMigrationBanner()}
-              style={{
-                background: 'transparent',
-                border: 'none',
-                color: theme.fgMuted,
-                cursor: 'pointer',
-                'font-size': '16px',
-                padding: '0 4px',
-                'line-height': '1',
-              }}
             >
               &times;
             </button>
@@ -935,6 +908,12 @@ function App() {
         </Show>
         <Show when={showDropOverlay()}>
           <DropOverlay />
+        </Show>
+        {/* Not before the close handler is listening: Cmd+Q closes the window,
+            and a close nobody answers hits the backend's 5s watchdog, which
+            force-destroys and takes the terminals with it. */}
+        <Show when={isMac && closeHandlerReady()}>
+          <HoldToQuit />
         </Show>
         <Show when={store.notification}>
           <div

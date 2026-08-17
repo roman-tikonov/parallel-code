@@ -4,10 +4,15 @@ import { errMessage } from '../lib/log';
 import { invoke } from '../lib/ipc';
 import { IPC } from '../../electron/ipc/channels';
 import { createDialogScroll } from '../lib/dialog-scroll';
+import {
+  createDiffIdentity,
+  createRequestGenerationGuard,
+  createReviewIdentity,
+} from '../lib/diff-review-lifecycle';
 import { theme } from '../lib/theme';
 import { sf } from '../lib/fontScale';
 import { parseUnifiedDiff } from '../lib/unified-diff-parser';
-import { evictStaleAnnotations } from '../lib/review-eviction';
+import { type QualityFindingProvider } from '../lib/quality-findings';
 import { windowChromeTopInset } from '../lib/platform';
 import { ScrollingDiffView } from './ScrollingDiffView';
 import {
@@ -50,6 +55,8 @@ interface DiffViewerDialogProps {
   onCommitNavigate?: (selection: CommitSelection) => void;
   /** Git isolation mode — CommitNavBar is only shown for worktree-isolated tasks */
   gitIsolation?: GitIsolationMode;
+  /** Optional structured-finding source. Providers capture their own repository context. */
+  findingProvider?: QualityFindingProvider;
 }
 
 /** Compile review annotations into a prompt string for the agent. */
@@ -68,33 +75,43 @@ export function compileDiffReview(annotations: ReviewAnnotation[]): string {
 
 export function DiffViewerDialog(props: DiffViewerDialogProps) {
   const titleId = createUniqueId();
+  const reviewIdentity = () =>
+    createReviewIdentity({
+      taskId: props.taskId,
+      worktreePath: props.worktreePath,
+      projectRoot: props.projectRoot,
+      branchName: props.branchName,
+    });
   return (
-    <Dialog
+    <ReviewProvider
+      taskId={props.taskId}
+      agentId={props.agentId}
+      findingProvider={props.findingProvider}
+      reviewIdentity={reviewIdentity()}
       open={props.scrollToFile !== null}
-      onClose={props.onClose}
-      width="100vw"
-      labelledBy={titleId}
-      panelStyle={{
-        height: '100vh',
-        'max-height': 'none',
-        'max-width': 'none',
-        'border-radius': '0',
-        border: 'none',
-        overflow: 'hidden',
-        padding: '0',
-        gap: '0',
-      }}
+      compilePrompt={compileDiffReview}
+      onSubmitted={props.onClose}
     >
-      <h2 id={titleId} class="dialog-sr-only">
-        Diff viewer for {props.taskName ?? 'task'}: {props.scrollToFile ?? 'all changes'}
-      </h2>
-      <Show when={props.scrollToFile !== null}>
-        <ReviewProvider
-          taskId={props.taskId}
-          agentId={props.agentId}
-          compilePrompt={compileDiffReview}
-          onSubmitted={props.onClose}
-        >
+      <Dialog
+        open={props.scrollToFile !== null}
+        onClose={props.onClose}
+        width="100vw"
+        labelledBy={titleId}
+        panelStyle={{
+          height: '100vh',
+          'max-height': 'none',
+          'max-width': 'none',
+          'border-radius': '0',
+          border: 'none',
+          overflow: 'hidden',
+          padding: '0',
+          gap: '0',
+        }}
+      >
+        <h2 id={titleId} class="dialog-sr-only">
+          Diff viewer for {props.taskName ?? 'task'}: {props.scrollToFile ?? 'all changes'}
+        </h2>
+        <Show when={props.scrollToFile !== null}>
           <DiffViewerContent
             scrollToFile={props.scrollToFile}
             taskName={props.taskName}
@@ -111,9 +128,9 @@ export function DiffViewerDialog(props: DiffViewerDialogProps) {
             onCommitNavigate={props.onCommitNavigate}
             gitIsolation={props.gitIsolation}
           />
-        </ReviewProvider>
-      </Show>
-    </Dialog>
+        </Show>
+      </Dialog>
+    </ReviewProvider>
   );
 }
 
@@ -128,7 +145,7 @@ function DiffViewerContent(props: DiffViewerDialogProps) {
   const [searchQuery, setSearchQuery] = createSignal('');
   const [activeFilePath, setActiveFilePath] = createSignal<string | null>(null);
 
-  let fetchGeneration = 0;
+  const fetchGeneration = createRequestGenerationGuard();
   let searchInputRef: HTMLInputElement | undefined;
   let diffScrollRef: HTMLDivElement | undefined;
   let containerRef: HTMLDivElement | undefined;
@@ -166,8 +183,20 @@ function DiffViewerContent(props: DiffViewerDialogProps) {
     const projectRoot = props.projectRoot;
     const branchName = props.branchName;
     const baseBranch = props.baseBranch;
-    const thisGen = ++fetchGeneration;
+    const reviewIdentity = createReviewIdentity({
+      taskId: props.taskId,
+      worktreePath,
+      projectRoot,
+      branchName,
+    });
+    const thisGen = fetchGeneration.begin();
 
+    onCleanup(() => {
+      fetchGeneration.invalidate();
+      review.suspendDiffLoad();
+    });
+
+    review.beginDiffLoad();
     setSearchQuery('');
     setLoading(true);
     setError('');
@@ -204,18 +233,20 @@ function DiffViewerContent(props: DiffViewerDialogProps) {
     }
 
     diffPromise
-      .then((rawDiff) => {
-        if (thisGen !== fetchGeneration) return;
+      .then(async (rawDiff) => {
+        if (!fetchGeneration.isCurrent(thisGen)) return;
         const newFiles = parseUnifiedDiff(rawDiff);
+        const diffIdentity = await createDiffIdentity(reviewIdentity, rawDiff);
+        if (!fetchGeneration.isCurrent(thisGen)) return;
         setParsedFiles(newFiles);
-        review.replaceAnnotations((prev) => evictStaleAnnotations(prev, newFiles));
+        review.completeDiffLoad(diffIdentity, newFiles);
       })
       .catch((err) => {
-        if (thisGen !== fetchGeneration) return;
+        if (!fetchGeneration.isCurrent(thisGen)) return;
         setError(errMessage(err));
       })
       .finally(() => {
-        if (thisGen === fetchGeneration) setLoading(false);
+        if (fetchGeneration.isCurrent(thisGen)) setLoading(false);
       });
   });
 

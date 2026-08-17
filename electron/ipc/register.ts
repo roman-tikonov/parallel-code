@@ -43,7 +43,7 @@ import type { RemoteAttentionState } from '../remote/protocol.js';
 import { atomicWriteFileSync } from '../mcp/atomic.js';
 import { buildMcpLaunchArgs } from '../mcp/agent-args.js';
 import {
-  getGitIgnoredDirs,
+  getSymlinkCandidates,
   getMainBranch,
   getCurrentBranch,
   getChangedFiles,
@@ -54,6 +54,7 @@ import {
   getFileDiffFromBranch,
   getWorktreeStatus,
   listImportableWorktrees,
+  getBranchWorktreePath,
   commitAll,
   discardUncommitted,
   checkMergeStatus,
@@ -199,6 +200,7 @@ export function validateStartMCPServerArgs(args: Record<string, unknown>): void 
   }
   if (args.agentCommand !== undefined) assertString(args.agentCommand, 'agentCommand');
   if (args.agentArgs !== undefined) assertStringArray(args.agentArgs, 'agentArgs');
+  assertOptionalString(args.agentEnvFile, 'agentEnvFile');
   assertOptionalBoolean(args.skipPermissions, 'skipPermissions');
   assertOptionalBoolean(args.propagateSkipPermissions, 'propagateSkipPermissions');
   assertOptionalBoolean(args.shareDockerAgentAuth, 'shareDockerAgentAuth');
@@ -440,6 +442,7 @@ export function registerAllHandlers(win: BrowserWindow): void {
     assertOptionalBoolean(args.shareDockerAgentAuth, 'shareDockerAgentAuth');
     assertOptionalBoolean(args.attachExisting, 'attachExisting');
     assertOptionalBoolean(args.stepsEnabled, 'stepsEnabled');
+    assertOptionalString(args.envFile, 'envFile');
     if (args.cwd) validatePath(args.cwd, 'cwd');
     if (!args.isShell && args.cwd) {
       try {
@@ -599,10 +602,13 @@ export function registerAllHandlers(win: BrowserWindow): void {
     return getFileDiffFromBranch(projectRoot, branchName, args.filePath, optionalBaseBranch(args));
   });
   ipcMain.handle(IPC.GetGitignoredDirs, (_e, args) => {
-    return getGitIgnoredDirs(projectRootArg(args));
+    return getSymlinkCandidates(projectRootArg(args));
   });
   ipcMain.handle(IPC.ListImportableWorktrees, (_e, args) => {
     return listImportableWorktrees(projectRootArg(args));
+  });
+  ipcMain.handle(IPC.GetBranchWorktreePath, (_e, args) => {
+    return getBranchWorktreePath(projectRootArg(args), branchNameArg(args));
   });
   ipcMain.handle(IPC.GetWorktreeStatus, (_e, args) => {
     const worktreePath = worktreePathArg(args);
@@ -894,12 +900,14 @@ export function registerAllHandlers(win: BrowserWindow): void {
     validatePath(args.cwd, 'cwd');
     const provider: string | undefined =
       typeof args.provider === 'string' ? args.provider : undefined;
+    assertOptionalString(args.envFile, 'envFile');
     askAboutCode(win, {
       requestId: args.requestId,
       channelId: args.onOutput.__CHANNEL_ID__,
       prompt: args.prompt,
       cwd: args.cwd,
       provider: provider === 'minimax' ? 'minimax' : 'claude',
+      envFile: args.envFile,
     });
   });
 
@@ -1602,6 +1610,7 @@ export function registerAllHandlers(win: BrowserWindow): void {
         propagateSkipPermissions?: boolean;
         agentCommand?: string;
         agentArgs?: string[];
+        agentEnvFile?: string;
         dockerContainerName?: string;
         dockerImage?: string;
         shareDockerAgentAuth?: boolean;
@@ -1765,6 +1774,7 @@ export function registerAllHandlers(win: BrowserWindow): void {
         args.agentCommand ?? 'claude',
         args.agentArgs ?? [],
       );
+      coordinator.setCoordinatorAgentEnvFile(args.coordinatorTaskId, args.agentEnvFile);
 
       // In docker mode the coordinator agent auto-discovers .mcp.json in the project root.
       // No host-temp configPath needed.

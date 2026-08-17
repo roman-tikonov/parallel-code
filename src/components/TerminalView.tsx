@@ -9,7 +9,7 @@ import { TerminalBookmarkGutter } from './TerminalBookmarks';
 import { invoke, fireAndForget, Channel } from '../lib/ipc';
 import { IPC } from '../../electron/ipc/channels';
 import { getTerminalFontFamily } from '../lib/fonts';
-import { TERMINAL_SCROLLBACK_LINES, base64ToUint8Array } from '../lib/terminalConstants';
+import { TERMINAL_SCROLL_OPTIONS, base64ToUint8Array } from '../lib/terminalConstants';
 import {
   getTerminalSearchDecorations,
   getTerminalTheme,
@@ -119,6 +119,8 @@ interface TerminalViewProps {
   args: string[];
   cwd: string;
   env?: Record<string, string>;
+  /** Path to a `KEY=VALUE` file merged into the agent's environment at spawn. */
+  envFile?: string;
   isShell?: boolean;
   /** Scroll bookmarks reserve a 24px left gutter. Only agent terminals use it;
    *  shell terminals (in-task shells and standalone full-size panels) opt out
@@ -417,9 +419,10 @@ export function TerminalView(props: TerminalViewProps) {
       cursorBlink: true,
       fontSize: initialFontSize,
       fontFamily: getTerminalFontFamily(store.terminalFont),
+      screenReaderMode: store.terminalScreenReaderMode,
       theme: activeTerminalTheme(),
       allowProposedApi: true,
-      scrollback: TERMINAL_SCROLLBACK_LINES,
+      ...TERMINAL_SCROLL_OPTIONS,
       disableStdin: taskPtyDetached(),
       linkHandler: {
         activate: openTerminalHttpLinkWithModifier,
@@ -1036,6 +1039,7 @@ export function TerminalView(props: TerminalViewProps) {
         args: props.args,
         cwd: props.cwd,
         env: props.env ?? {},
+        envFile: props.envFile,
         cols: term.cols,
         rows: term.rows,
         isShell: props.isShell,
@@ -1131,6 +1135,12 @@ export function TerminalView(props: TerminalViewProps) {
     if (!term || !fitAddon) return;
     term.options.fontFamily = getTerminalFontFamily(font);
     markDirty(props.agentId);
+  });
+
+  createEffect(() => {
+    const screenReaderMode = store.terminalScreenReaderMode;
+    if (!term) return;
+    term.options.screenReaderMode = screenReaderMode;
   });
 
   createEffect(() => {

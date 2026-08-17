@@ -42,6 +42,7 @@ import type { Task } from '../store/types';
 import type { CommitInfo } from '../ipc/types';
 import { isLandedTaskState } from '../store/landing';
 import { shouldPollTaskCommits } from './task-commit-polling';
+import { devQualityFindingProvider } from './dev-quality-finding-fixture';
 
 interface TaskPanelProps {
   task: Task;
@@ -651,11 +652,12 @@ export function TaskPanel(props: TaskPanelProps) {
           baseBranch={props.task.baseBranch}
           onClose={() => setDiffScrollTarget(null)}
           taskId={props.task.id}
-          agentId={props.task.agentIds[0]}
+          agentId={selectedAgentId()}
           commitList={commitList()}
           selectedCommit={selectedCommit()}
           onCommitNavigate={setSelectedCommit}
           gitIsolation={props.task.gitIsolation}
+          findingProvider={devQualityFindingProvider}
         />
       </Show>
       <EditProjectDialog project={editingProject()} onClose={() => setEditingProjectId(null)} />

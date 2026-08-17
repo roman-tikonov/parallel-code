@@ -1,4 +1,4 @@
-import { For, Show, createSignal, createEffect, onMount, onCleanup, untrack } from 'solid-js';
+import { For, Show, createSignal, createEffect, onMount, onCleanup, untrack, on } from 'solid-js';
 import type { JSX } from 'solid-js';
 import { theme } from '../lib/theme';
 import { sf } from '../lib/fontScale';
@@ -14,9 +14,15 @@ import { getDiffSelection } from '../lib/diff-selection';
 import { getContextGapLineCount, type ContextGapRange } from '../lib/diff-context-gaps';
 import { AskCodeCard } from './AskCodeCard';
 import { ReviewCommentCard } from './ReviewCommentCard';
+import { QualityFindingCard } from './QualityFindingCard';
 import { InlineInput } from './InlineInput';
-import { useReview, type ActiveQuestion } from './ReviewProvider';
+import { useReview, type ActiveQuestion, type ReviewScrollTarget } from './ReviewProvider';
+import type { QualityFinding } from '../lib/quality-findings';
 import type { ReviewAnnotation, DiffInteractionMode } from './review-types';
+import {
+  expandCollapsedFileForNavigation,
+  scheduleReviewNavigationHighlightClear,
+} from './review-navigation';
 
 interface ScrollingDiffViewProps {
   files: FileDiff[];
@@ -25,7 +31,7 @@ interface ScrollingDiffViewProps {
   /** Base branch for diff comparison (e.g. 'main', 'develop'). Undefined = auto-detect. */
   baseBranch?: string;
   searchQuery?: string;
-  scrollToAnnotation?: ReviewAnnotation | null;
+  scrollToAnnotation?: ReviewScrollTarget | null;
   onScrollRef?: (el: HTMLDivElement) => void;
 }
 
@@ -449,6 +455,8 @@ function FileSection(props: {
   worktreePath: string;
   baseBranch?: string;
   ref: (el: HTMLDivElement) => void;
+  collapsed: boolean;
+  onCollapsedChange: (collapsed: boolean) => void;
   dimmed: boolean;
   searchQuery?: string;
   activeQuestions: ActiveQuestion[];
@@ -456,12 +464,13 @@ function FileSection(props: {
   reviewAnnotations: ReviewAnnotation[];
   onDismissAnnotation: (id: string) => void;
   onAnnotationUpdate: (id: string, comment: string) => void;
+  qualityFindings: QualityFinding[];
+  onDismissFinding: (id: string) => void;
   highlightedRange?: HighlightRange | null;
   pendingInput?: { filePath: string; afterLine: number } | null;
   onSubmit: (text: string, mode: 'review' | 'ask') => void;
   onDismiss: () => void;
 }) {
-  const [collapsed, setCollapsed] = createSignal(false);
   const lang = () => detectLang(props.file.path);
   const added = () =>
     props.file.hunks.reduce((s, h) => s + h.lines.filter((l) => l.type === 'add').length, 0);
@@ -483,7 +492,7 @@ function FileSection(props: {
     >
       {/* Sticky file header */}
       <div
-        onClick={() => setCollapsed(!collapsed())}
+        onClick={() => props.onCollapsedChange(!props.collapsed)}
         style={{
           position: 'sticky',
           top: '0',
@@ -505,7 +514,7 @@ function FileSection(props: {
             'font-size': sf(12),
             'user-select': 'none',
             transition: 'transform 0.15s',
-            transform: collapsed() ? 'rotate(-90deg)' : 'rotate(0deg)',
+            transform: props.collapsed ? 'rotate(-90deg)' : 'rotate(0deg)',
             display: 'inline-block',
           }}
         >
@@ -590,7 +599,7 @@ function FileSection(props: {
       </div>
 
       {/* File body */}
-      <Show when={!collapsed()}>
+      <Show when={!props.collapsed}>
         <Show when={props.file.binary}>
           <div
             style={{
@@ -710,6 +719,23 @@ function FileSection(props: {
                             />
                           )}
                         </For>
+                        <For
+                          each={itemsForHunk(
+                            props.qualityFindings,
+                            props.file.path,
+                            (finding) => finding.location.filePath,
+                            (finding) => finding.location.startLine,
+                            hunk.newStart,
+                            nextStart,
+                          )}
+                        >
+                          {(finding) => (
+                            <QualityFindingCard
+                              finding={finding}
+                              onDismiss={() => props.onDismissFinding(finding.id)}
+                            />
+                          )}
+                        </For>
                       </>
                     );
                   })()}
@@ -749,28 +775,54 @@ function FileSection(props: {
 export function ScrollingDiffView(props: ScrollingDiffViewProps) {
   const review = useReview();
   const sectionRefs = new Map<string, HTMLDivElement>();
+  const [collapsedFiles, setCollapsedFiles] = createSignal<ReadonlySet<string>>(new Set());
   const [dimOthers, setDimOthers] = createSignal(false);
-  let dimTimer: ReturnType<typeof setTimeout> | undefined;
+  let navigationFrame: number | undefined;
+  let navigationLineFrame: number | undefined;
+  let navigationHighlightTimer: ReturnType<typeof setTimeout> | undefined;
   let containerRef: HTMLDivElement | undefined;
+
+  createEffect(
+    on(
+      () => props.files,
+      () => setCollapsedFiles(new Set<string>()),
+    ),
+  );
 
   const highlightedRange = (): HighlightRange | null => {
     const selection = review.pendingSelection();
-    return selection
+    if (selection) {
+      return {
+        filePath: selection.source,
+        startLine: selection.startLine,
+        endLine: selection.endLine,
+      };
+    }
+    const target = props.scrollToAnnotation;
+    return target
       ? {
-          filePath: selection.source,
-          startLine: selection.startLine,
-          endLine: selection.endLine,
+          filePath: target.filePath,
+          startLine: target.startLine,
+          endLine: target.endLine ?? target.startLine,
         }
       : null;
   };
 
-  onCleanup(() => clearTimeout(dimTimer));
+  function clearNavigationSchedule() {
+    if (navigationFrame !== undefined) cancelAnimationFrame(navigationFrame);
+    if (navigationLineFrame !== undefined) cancelAnimationFrame(navigationLineFrame);
+    clearTimeout(navigationHighlightTimer);
+    navigationFrame = undefined;
+    navigationLineFrame = undefined;
+    navigationHighlightTimer = undefined;
+  }
+
+  onCleanup(clearNavigationSchedule);
 
   /** Scroll to a file section when scrollToPath changes. */
   createEffect(() => {
     const target = props.scrollToPath;
     if (!target) return;
-    clearTimeout(dimTimer);
     setDimOthers(true);
     // Start fade-in on next frame so the browser registers the dimmed state first
     requestAnimationFrame(() => setDimOthers(false));
@@ -804,15 +856,31 @@ export function ScrollingDiffView(props: ScrollingDiffViewProps) {
   /** Scroll to a specific annotation (e.g. clicked in the sidebar). */
   createEffect(() => {
     const target = props.scrollToAnnotation;
+    clearNavigationSchedule();
     if (!target) return;
-    const el = containerRef?.querySelector(
-      `[data-file-path="${CSS.escape(target.filePath)}"][data-new-line="${target.startLine}"]`,
-    );
-    if (el && containerRef) {
-      const containerTop = containerRef.getBoundingClientRect().top;
-      const elTop = el.getBoundingClientRect().top;
-      containerRef.scrollTop = elTop - containerTop + containerRef.scrollTop - 80;
-    }
+    const currentCollapsed = untrack(collapsedFiles);
+    const expanded = expandCollapsedFileForNavigation(currentCollapsed, target.filePath);
+    if (expanded !== currentCollapsed) setCollapsedFiles(expanded);
+
+    navigationFrame = requestAnimationFrame(() => {
+      navigationFrame = undefined;
+      navigationLineFrame = requestAnimationFrame(() => {
+        navigationLineFrame = undefined;
+        const el = containerRef?.querySelector(
+          `[data-file-path="${CSS.escape(target.filePath)}"][data-new-line="${target.startLine}"]`,
+        );
+        if (el && containerRef) {
+          const containerTop = containerRef.getBoundingClientRect().top;
+          const elTop = el.getBoundingClientRect().top;
+          containerRef.scrollTop = elTop - containerTop + containerRef.scrollTop - 80;
+        }
+        navigationHighlightTimer = scheduleReviewNavigationHighlightClear(
+          target,
+          () => untrack(() => props.scrollToAnnotation),
+          () => review.setScrollTarget(null),
+        );
+      });
+    });
   });
 
   onMount(() => {
@@ -891,6 +959,15 @@ export function ScrollingDiffView(props: ScrollingDiffViewProps) {
             worktreePath={props.worktreePath}
             baseBranch={props.baseBranch}
             ref={(el) => sectionRefs.set(file.path, el)}
+            collapsed={collapsedFiles().has(file.path)}
+            onCollapsedChange={(collapsed) =>
+              setCollapsedFiles((previous) => {
+                const next = new Set(previous);
+                if (collapsed) next.add(file.path);
+                else next.delete(file.path);
+                return next;
+              })
+            }
             dimmed={dimOthers() && file.path !== props.scrollToPath}
             searchQuery={props.searchQuery}
             activeQuestions={review.activeQuestions()}
@@ -898,6 +975,10 @@ export function ScrollingDiffView(props: ScrollingDiffViewProps) {
             reviewAnnotations={review.annotations()}
             onDismissAnnotation={review.dismissAnnotation}
             onAnnotationUpdate={review.updateAnnotation}
+            qualityFindings={review
+              .openFindings()
+              .filter((finding) => finding.freshness === 'current')}
+            onDismissFinding={review.dismissFinding}
             highlightedRange={highlightedRange()}
             pendingInput={(() => {
               const pi = review.pendingSelection();
