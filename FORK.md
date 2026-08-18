@@ -4,12 +4,21 @@ This fork carries a small set of patches on top of upstream. Each fork-only
 change gets an entry here, in the same commit that introduces it. Sync merges
 from upstream update the line below.
 
-Synced with upstream: 2026-07-14 (merge `6ffeec7`)
+Synced with upstream: 2026-07-28 (merge `baf3c03`)
 
 List fork-only commits: `git fork-log`
 (alias for `git log --oneline --no-merges upstream/main..fork/main`)
 
 ## Active patches
+
+### Preserve container-defined SHELL in Docker tasks
+
+Docker task launches no longer forward the host `SHELL`, which can point to a
+host-only binary such as `/opt/homebrew/bin/fish`. Each container image keeps
+its own valid `SHELL` declaration instead, while native tasks continue to
+inherit the host environment.
+
+Upstreamable. Drop when upstream merges an equivalent.
 
 ### Honor OSC 52 so agent panes can copy (`6267dfe`)
 
@@ -18,7 +27,7 @@ and hand copied text to the terminal via OSC 52. xterm's core parser leaves 52
 unhandled and `@xterm/addon-clipboard` isn't a dependency, so the sequence was
 dropped: the agent reported "sent N chars via OSC 52" while the system clipboard
 never changed. Adds `src/lib/osc52.ts` (payload parser, UTF-8 decode) and
-registers an OSC 52 handler in `TerminalView`. Clipboard *reads* (`?` payload)
+registers an OSC 52 handler in `TerminalView`. Clipboard _reads_ (`?` payload)
 are swallowed rather than answered, so anything writing to the PTY cannot
 exfiltrate the clipboard.
 

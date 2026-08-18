@@ -700,6 +700,9 @@ const DOCKER_ENV_BLOCK_LIST = new Set([
   // run as the host user's uid/gid. Agents need a writable HOME for config
   // files, so Docker mode sets HOME to DOCKER_CONTAINER_HOME explicitly.
   'HOME',
+  // Host SHELL may point to a host-only binary (for example Homebrew fish on
+  // macOS). Let the container image's SHELL declaration remain authoritative.
+  'SHELL',
   // Display / desktop session
   'DISPLAY',
   'WAYLAND_DISPLAY',

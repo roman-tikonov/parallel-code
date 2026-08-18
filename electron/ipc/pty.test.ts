@@ -375,6 +375,24 @@ describe('spawnAgent docker mode', () => {
     expect(options.env.ANTHROPIC_API_KEY).toBe('sk-ant-super-secret');
   });
 
+  it('does not override the container image SHELL with a host or renderer path', () => {
+    vi.stubEnv('SHELL', '/opt/homebrew/bin/fish');
+
+    spawnAgent(
+      createMockWindow(),
+      buildSpawnArgs({
+        env: {
+          API_KEY: 'secret',
+          SHELL: '/host/renderer/zsh',
+        },
+      }),
+    );
+
+    const envFlags = getFlagValues(getLastSpawnCall().args, '-e');
+    expect(envFlags).toContain('API_KEY');
+    expect(envFlags.some((value) => value.startsWith('SHELL='))).toBe(false);
+  });
+
   it('redacts docker env values in spawn debug logs', () => {
     spawnAgent(
       createMockWindow(),
