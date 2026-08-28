@@ -25,6 +25,7 @@ import { PlanViewerDialog } from './PlanViewerDialog';
 import { EditProjectDialog } from './EditProjectDialog';
 import { TaskTitleBar } from './TaskTitleBar';
 import { TaskBranchInfoBar } from './TaskBranchInfoBar';
+import { TaskBranchAdoptionBanner } from './TaskBranchAdoptionBanner';
 import { TaskNotesBody } from './TaskNotesBody';
 import { TaskChangedFilesSection } from './TaskChangedFilesSection';
 import { isCommitHashSelection, type CommitSelection } from './CommitNavBar';
@@ -43,6 +44,7 @@ import type { CommitInfo } from '../ipc/types';
 import { isLandedTaskState } from '../store/landing';
 import { shouldPollTaskCommits } from './task-commit-polling';
 import { devQualityFindingProvider } from './dev-quality-finding-fixture';
+import { createEslintQualityFindingProvider } from '../lib/eslint-quality-findings';
 
 interface TaskPanelProps {
   task: Task;
@@ -57,6 +59,9 @@ const CHANGED_FILES_PANEL_AUTO_MAX = 'min(300px, 33vh)';
 const NOTES_PANEL_AUTO_MAX = 'min(400px, 33vh)';
 
 export function TaskPanel(props: TaskPanelProps) {
+  const eslintQualityFindingProvider = createEslintQualityFindingProvider(
+    () => props.task.worktreePath,
+  );
   const [showCloseConfirm, setShowCloseConfirm] = createSignal(false);
   const [planFullscreen, setPlanFullscreen] = createSignal(false);
 
@@ -510,6 +515,7 @@ export function TaskPanel(props: TaskPanelProps) {
       <Show when={props.task.coordinatorMode}>
         <SubTaskStrip coordinatorTaskId={props.task.id} />
       </Show>
+      <TaskBranchAdoptionBanner task={props.task} />
       <div
         class="task-header-stack"
         style={{
@@ -657,7 +663,7 @@ export function TaskPanel(props: TaskPanelProps) {
           selectedCommit={selectedCommit()}
           onCommitNavigate={setSelectedCommit}
           gitIsolation={props.task.gitIsolation}
-          findingProvider={devQualityFindingProvider}
+          findingProvider={devQualityFindingProvider ?? eslintQualityFindingProvider}
         />
       </Show>
       <EditProjectDialog project={editingProject()} onClose={() => setEditingProjectId(null)} />

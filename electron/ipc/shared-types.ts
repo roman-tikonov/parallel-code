@@ -72,6 +72,9 @@ export interface WorktreeStatus {
   has_committed_changes: boolean;
   has_uncommitted_changes: boolean;
   current_branch: string | null;
+  /** Resolved base branch (explicit or detected main); null when the worktree
+   *  is unreadable. */
+  base_branch: string | null;
 }
 
 export interface ImportableWorktree {
@@ -135,6 +138,27 @@ export interface BranchPrDetectionResult {
   url: string | null;
   unavailable?: 'missing' | 'auth';
 }
+
+export interface EslintQualityFinding {
+  id: string;
+  source: 'eslint';
+  ruleId: string;
+  category: 'maintainability';
+  severity: 'error' | 'warning';
+  location: {
+    filePath: string;
+    startLine: number;
+    startColumn?: number;
+    endLine?: number;
+    endColumn?: number;
+  };
+  explanation: string;
+}
+
+export type EslintQualityResult =
+  | { status: 'available'; findings: EslintQualityFinding[] }
+  | { status: 'not-applicable' }
+  | { status: 'unavailable'; message: string };
 
 export interface StepEntry {
   summary: string;

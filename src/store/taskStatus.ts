@@ -4,7 +4,15 @@ import { IPC } from '../../electron/ipc/channels';
 import { store, setStore } from './core';
 import type { WorktreeStatus } from '../ipc/types';
 import type { TaskGitStatusSnapshot } from './types';
-import { warn as logWarn, errMessage } from '../lib/log';
+import {
+  detectBranchDivergence,
+  divergenceKey,
+  trackDivergence,
+  type BranchDivergence,
+  type DivergenceObservation,
+} from '../lib/branch-divergence';
+import { warn as logWarn, info as logInfo, errMessage } from '../lib/log';
+import { adoptTaskBranch } from './task-branch';
 import {
   chunkContainsAgentPrompt,
   PROMPT_PATTERNS,
@@ -982,9 +990,52 @@ function scheduleGitStatusStaleTimer(taskId: string, refreshedAt: number): void 
   gitStatusStaleTimers.set(taskId, timer);
 }
 
+// Per-task divergence sightings for the two-snapshot debounce. Not reactive on
+// purpose: entries only change together with a store.taskGitStatus write, so
+// getBranchDivergence stays reactive through the snapshot it reads.
+const divergenceObservations = new Map<string, DivergenceObservation | null>();
+
+/**
+ * Confirmed divergence between the branch a task tracks and the branch the
+ * agent actually put its worktree on. Null until the same divergence has
+ * survived two consecutive git-status snapshots (agents switch branches
+ * transiently mid-rebase).
+ */
+export function getBranchDivergence(taskId: string): BranchDivergence | null {
+  const task = store.tasks[taskId];
+  const snapshot = store.taskGitStatus[taskId];
+  if (!task || !snapshot) return null;
+  const divergence = detectBranchDivergence(task, snapshot);
+  if (!divergence) return null;
+  const obs = divergenceObservations.get(taskId);
+  return obs && obs.key === divergenceKey(divergence) && snapshot.refreshedAt > obs.firstSeenAt
+    ? divergence
+    : null;
+}
+
 export function clearTaskGitStatusTracking(taskId: string): void {
   clearGitStatusStaleTimer(taskId);
   gitRefreshVersions.delete(taskId);
+  divergenceObservations.delete(taskId);
+}
+
+/** Auto-adopt a confirmed divergent branch as the task branch. Runs after
+ *  every successful snapshot write; the two-snapshot debounce inside
+ *  getBranchDivergence keeps transient checkouts (rebases, bisects) from
+ *  adopting. The banner on the task explains what happened and offers undo;
+ *  an undone (dismissed) branch is never re-adopted. */
+function maybeAdoptDivergentBranch(taskId: string): void {
+  const divergence = getBranchDivergence(taskId);
+  if (divergence?.kind !== 'switched' || !divergence.adoptable) return;
+  const task = store.tasks[taskId];
+  // Don't touch branch identity mid-close: cleanup deletes by branch name.
+  if (!task || task.closingStatus) return;
+  logInfo('taskStatus', 'Auto-adopting branch the agent switched the worktree to', {
+    taskId,
+    from: task.branchName,
+    to: divergence.branch,
+  });
+  adoptTaskBranch(taskId, divergence.branch);
 }
 
 async function refreshTaskGitStatus(
@@ -1007,6 +1058,7 @@ async function refreshTaskGitStatus(
             has_committed_changes: false,
             has_uncommitted_changes: false,
             current_branch: null,
+            base_branch: null,
             refreshedAt: 0,
             refreshing: true,
           },
@@ -1023,9 +1075,30 @@ async function refreshTaskGitStatus(
     const next: TaskGitStatusSnapshot = {
       ...status,
       refreshedAt,
+      // Solid's setStore MERGES objects at a path instead of replacing them,
+      // so flags from earlier snapshots survive any write that omits them. A
+      // single failed refresh (error), 5-minute polling gap (stale), or
+      // invalidateExisting pass (refreshing) would otherwise poison the
+      // snapshot for the rest of the session, permanently suppressing branch
+      // divergence detection and the ready status. `error: undefined` deletes
+      // the key on merge.
+      refreshing: false,
+      stale: false,
+      error: undefined,
     };
+    // Update the divergence debounce before the snapshot write so consumers
+    // reacting to the write read a consistent observation.
+    divergenceObservations.set(
+      taskId,
+      trackDivergence(
+        divergenceObservations.get(taskId) ?? null,
+        detectBranchDivergence(task, next),
+        refreshedAt,
+      ),
+    );
     setStore('taskGitStatus', taskId, next);
     scheduleGitStatusStaleTimer(taskId, refreshedAt);
+    maybeAdoptDivergentBranch(taskId);
   } catch (err) {
     if (!store.tasks[taskId] || !isCurrentGitRefresh(taskId, version)) return;
     clearGitStatusStaleTimer(taskId);
@@ -1043,6 +1116,7 @@ async function refreshTaskGitStatus(
             has_committed_changes: false,
             has_uncommitted_changes: false,
             current_branch: null,
+            base_branch: null,
             refreshedAt: 0,
             refreshing: false,
             error: errMessage(err),

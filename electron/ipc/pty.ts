@@ -7,7 +7,13 @@ import { fileURLToPath } from 'url';
 import type { BrowserWindow } from 'electron';
 import { RingBuffer } from '../remote/ring-buffer.js';
 import { resolveUserShell } from '../user-shell.js';
-import { ensureClaudeSandboxFiles, ensureSandboxExcludes } from './git.js';
+import {
+  detectRepoRoot,
+  ensureClaudeSandboxFiles,
+  ensureSandboxExcludes,
+  ensureWorktreeContainerExclude,
+  refreshWorktreeNodeModules,
+} from './git.js';
 import { loadEnvFile } from './env-file.js';
 import { debug as logDebug } from '../log.js';
 
@@ -525,8 +531,15 @@ export function spawnAgent(win: BrowserWindow, args: SpawnAgentArgs): void {
   // Backfill sandbox placeholders for pre-existing worktrees (and anywhere
   // Claude Code may launch). See ensureClaudeSandboxFiles for the why.
   if (!args.dockerMode && fs.existsSync(cwd)) {
-    ensureClaudeSandboxFiles(cwd);
+    // Resolve the repo root once — each helper would otherwise spawn its own
+    // `git rev-parse` subprocess.
+    const repoRoot = detectRepoRoot(cwd);
+    ensureClaudeSandboxFiles(cwd, repoRoot);
     ensureSandboxExcludes(cwd);
+    ensureWorktreeContainerExclude(cwd);
+    // Migrate legacy whole-dir node_modules symlinks and pick up packages
+    // installed in the main checkout since worktree creation.
+    refreshWorktreeNodeModules(cwd, repoRoot);
   }
 
   const spawnSpec = buildPtySpawnSpec(args, command, cwd, spawnEnv);
